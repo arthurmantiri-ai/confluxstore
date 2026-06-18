@@ -1,4 +1,6 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { hasSupabase } from "./supabaseClient";
+import { Products, Movements, Orders as OrdersApi, Debts as DebtsApi, Capital, Expenses, Sales, Settings as SettingsApi } from "./db";
 import {
   LayoutDashboard, Package, ShoppingCart, Globe, RefreshCcw,
   Plus, Minus, Search, X, Check, TrendingUp, ArrowUpRight, ArrowDownRight,
@@ -453,23 +455,55 @@ export default function App() {
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 2200); };
   const pById = (id) => products.find((p) => p.id === id);
 
+  // ===== Sinkronisasi Supabase =====
+  const persist = (fn) => { if (hasSupabase) fn().catch((e) => console.error("[sync]", e)); };
+
+  useEffect(() => {
+    if (!hasSupabase) return;
+    let alive = true;
+    (async () => {
+      try {
+        const [p, mv, od, dz, cap, exp, sl] = await Promise.all([
+          Products.list(), Movements.list(), OrdersApi.list(), DebtsApi.list(),
+          Capital.list(), Expenses.list(), Sales.list(),
+        ]);
+        if (!alive) return;
+        setProducts(p); setMovements(mv); setOrders(od); setDebts(dz);
+        setCapital(cap); setExpenses(exp); setSalesLog(sl);
+        try { const st = await SettingsApi.get(); if (alive && st) setStore((s) => ({ ...s, ...st })); } catch (_) {}
+        flash("Tersambung ke database");
+      } catch (e) {
+        console.error("[load]", e);
+        flash("Gagal memuat data server — memakai data contoh");
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
   const recordMovement = (productId, type, qty, note) => {
-    setProducts((ps) => ps.map((p) =>
-      p.id === productId
-        ? { ...p, stock: Math.max(0, p.stock + (type === "in" ? qty : -qty)) }
-        : p
-    ));
+    const prev = products.find((p) => p.id === productId);
+    const newStock = prev ? Math.max(0, prev.stock + (type === "in" ? qty : -qty)) : 0;
+    setProducts((ps) => ps.map((p) => (p.id === productId ? { ...p, stock: newStock } : p)));
     setMovements((m) => [{ id: uid(), productId, type, qty, note, at: "Baru saja" }, ...m]);
+    persist(() => Movements.create({ productId, type, qty, note }));
+    persist(() => Products.setStock(productId, newStock));
   };
 
   const addSale = (amount) => {
     setSales7((s) => s.map((d, i) => (i === s.length - 1 ? { ...d, v: d.v + amount } : d)));
   };
 
-  const addProduct = (data) => {
+  const addProduct = async (data) => {
     const code = nextCode(products);
-    const id = uid();
-    setProducts((ps) => [{ id, code, ...data }, ...ps]);
+    if (hasSupabase) {
+      try {
+        const row = await Products.create({ code, ...data });
+        setProducts((ps) => [row, ...ps]);
+        flash(`Barang ${code} ditambahkan`);
+        return;
+      } catch (e) { console.error("[sync]", e); flash("Gagal simpan ke server"); }
+    }
+    setProducts((ps) => [{ id: uid(), code, ...data }, ...ps]);
     flash(`Barang ${code} ditambahkan`);
   };
 
@@ -482,14 +516,18 @@ export default function App() {
         { id: uid(), productId: id, type: diff > 0 ? "in" : "out", qty: Math.abs(diff), note: "Penyesuaian (edit barang)", at: "Baru saja" },
         ...m,
       ]);
+      persist(() => Movements.create({ productId: id, type: diff > 0 ? "in" : "out", qty: Math.abs(diff), note: "Penyesuaian (edit barang)" }));
     }
-    setProducts((ps) => ps.map((p) => (p.id === id ? { ...p, ...data } : p)));
+    const merged = { ...prev, ...data };
+    setProducts((ps) => ps.map((p) => (p.id === id ? merged : p)));
+    persist(() => Products.update(id, merged));
     flash("Barang diperbarui");
   };
 
   const deleteProduct = (id) => {
     const p = products.find((x) => x.id === id);
     setProducts((ps) => ps.filter((x) => x.id !== id));
+    persist(() => Products.remove(id));
     flash(`${p?.code || "Barang"} dihapus`);
   };
 
@@ -498,25 +536,38 @@ export default function App() {
   // ===== Akuntansi =====
   const recordSale = (pid, qty, revenue) => {
     const p = products.find((x) => x.id === pid);
-    setSalesLog((sl) => [{ id: uid(), productId: pid, qty, revenue, cost: (p?.cost || 0) * qty, date: "Hari ini" }, ...sl]);
+    const rec = { productId: pid, qty, revenue, cost: (p?.cost || 0) * qty, date: "Hari ini" };
+    setSalesLog((sl) => [{ id: uid(), ...rec }, ...sl]);
+    persist(() => Sales.create(rec));
   };
-  const addCapital = (e) => setCapital((c) => [{ id: uid(), ...e }, ...c]);
-  const updateCapital = (id, e) => setCapital((c) => c.map((x) => (x.id === id ? { ...x, ...e } : x)));
-  const deleteCapital = (id) => setCapital((c) => c.filter((x) => x.id !== id));
-  const addExpense = (e) => setExpenses((x) => [{ id: uid(), ...e }, ...x]);
-  const updateExpense = (id, e) => setExpenses((x) => x.map((y) => (y.id === id ? { ...y, ...e } : y)));
-  const deleteExpense = (id) => setExpenses((x) => x.filter((y) => y.id !== id));
+  const addCapital = async (e) => {
+    if (hasSupabase) { try { const row = await Capital.create(e); setCapital((c) => [{ id: row.id, ...e }, ...c]); return; } catch (err) { console.error("[sync]", err); } }
+    setCapital((c) => [{ id: uid(), ...e }, ...c]);
+  };
+  const updateCapital = (id, e) => { setCapital((c) => c.map((x) => (x.id === id ? { ...x, ...e } : x))); persist(() => Capital.update(id, e)); };
+  const deleteCapital = (id) => { setCapital((c) => c.filter((x) => x.id !== id)); persist(() => Capital.remove(id)); };
+  const addExpense = async (e) => {
+    if (hasSupabase) { try { const row = await Expenses.create(e); setExpenses((x) => [{ id: row.id, ...e }, ...x]); return; } catch (err) { console.error("[sync]", err); } }
+    setExpenses((x) => [{ id: uid(), ...e }, ...x]);
+  };
+  const updateExpense = (id, e) => { setExpenses((x) => x.map((y) => (y.id === id ? { ...y, ...e } : y))); persist(() => Expenses.update(id, e)); };
+  const deleteExpense = (id) => { setExpenses((x) => x.filter((y) => y.id !== id)); persist(() => Expenses.remove(id)); };
 
   const today = new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
   const addDebt = (meta, total) => {
-    setDebts((ds) => [{
-      id: nextDebtId(ds),
-      debtor: meta.debtor || "Pelanggan", business: meta.business || "", phone: meta.phone || "",
-      items: meta.items || [], total, date: today, status: "belum", paidAt: null,
-    }, ...ds]);
+    setDebts((ds) => {
+      const debt = {
+        id: nextDebtId(ds),
+        debtor: meta.debtor || "Pelanggan", business: meta.business || "", phone: meta.phone || "",
+        items: meta.items || [], total, date: today, status: "belum", paidAt: null,
+      };
+      persist(() => DebtsApi.create(debt));
+      return [debt, ...ds];
+    });
   };
   const settleDebt = (id) => {
     setDebts((ds) => ds.map((d) => (d.id === id ? { ...d, status: "lunas", paidAt: today } : d)));
+    persist(() => DebtsApi.settle(id, today));
     flash("Hutang ditandai lunas");
   };
 
@@ -665,6 +716,7 @@ export default function App() {
           )}
           {view === "order" && (
             <Orders orders={orders} setOrders={setOrders} pById={pById}
+              onStatus={(id, status) => persist(() => OrdersApi.setStatus(id, status))}
               onAccept={(o) => {
                 o.items.forEach((it) => recordMovement(it.pid, "out", it.qty, `Order ${o.id}`));
                 o.items.forEach((it) => { const p = pById(it.pid); if (p) recordSale(it.pid, it.qty, p.price * it.qty); });
@@ -713,10 +765,10 @@ export default function App() {
       {/* Pengaturan nota & printer */}
       <Modal
         open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+        onClose={() => { setSettingsOpen(false); persist(() => SettingsApi.save(store)); }}
         width={520}
         title="Pengaturan Nota & Printer"
-        footer={<button className="btn" onClick={() => setSettingsOpen(false)}><Check size={15} /> Selesai</button>}
+        footer={<button className="btn" onClick={() => { setSettingsOpen(false); persist(() => SettingsApi.save(store)); }}><Check size={15} /> Selesai</button>}
       >
         <div className="form">
           <label className="fld"><span>Nama toko</span>
@@ -1418,7 +1470,7 @@ const ORDER_FLOW = ["baru", "diproses", "dikirim", "selesai"];
 const ORDER_LABEL = { baru: "Baru", diproses: "Diproses", dikirim: "Dikirim", selesai: "Selesai" };
 const CHANNEL_ICON = { WhatsApp: Globe, Instagram: Globe, Marketplace: Truck };
 
-function Orders({ orders, setOrders, pById, onAccept, flash }) {
+function Orders({ orders, setOrders, pById, onAccept, onStatus, flash }) {
   const [tab, setTab] = useState("baru");
 
   const orderTotal = (o) => o.items.reduce((a, it) => a + (pById(it.pid)?.price || 0) * it.qty, 0);
@@ -1429,6 +1481,7 @@ function Orders({ orders, setOrders, pById, onAccept, flash }) {
     const next = ORDER_FLOW[Math.min(i + 1, ORDER_FLOW.length - 1)];
     if (o.status === "baru") onAccept(o);
     setOrders((os) => os.map((x) => (x.id === o.id ? { ...x, status: next } : x)));
+    onStatus && onStatus(o.id, next);
     if (o.status !== "baru") flash(`${o.id} → ${ORDER_LABEL[next]}`);
   };
 

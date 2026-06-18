@@ -84,10 +84,17 @@ export const Debts = {
   async list() {
     const { data, error } = await supabase.from("debts").select("*").order("created_at", { ascending: false });
     if (error) throw error;
-    return data;
+    return data.map((r) => ({
+      id: r.id, debtor: r.debtor, business: r.business, phone: r.phone,
+      items: r.items || [], total: Number(r.total), status: r.status, date: r.date, paidAt: r.paid_at,
+    }));
   },
   async create(d) {
-    const { error } = await supabase.from("debts").insert(d);
+    const row = {
+      id: d.id, debtor: d.debtor, business: d.business, phone: d.phone,
+      items: d.items || [], total: d.total, status: d.status || "belum", date: d.date, paid_at: d.paidAt ?? null,
+    };
+    const { error } = await supabase.from("debts").insert(row);
     if (error) throw error;
   },
   async settle(id, paidAt) {
