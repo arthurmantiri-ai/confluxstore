@@ -212,7 +212,7 @@ const catIcon = (category = "") => {
 
 // PIN manajer untuk membuka kunci edit & hapus barang.
 // (Demo: nanti diganti otentikasi berbasis peran lewat Supabase Auth)
-const MANAGER_PIN = "1234";
+const MANAGER_PIN = "170626";
 
 // Profil toko untuk header nota (bisa diubah di Pengaturan Nota)
 const DEFAULT_STORE = {
