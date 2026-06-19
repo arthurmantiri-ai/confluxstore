@@ -10,7 +10,7 @@ import {
   Lock, Unlock, ShieldCheck, Calculator, ArrowRight,
   Phone, Building2, User, CheckCircle2, Printer, Settings, LogOut,
   LineChart, BarChart3, Coins, Hammer, Download, Calendar,
-  Bean, Droplets, CupSoda, Coffee, LayoutGrid, History, Wallet2
+  Bean, Droplets, CupSoda, Coffee, LayoutGrid, History, Wallet2, Bluetooth
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -240,7 +240,7 @@ const DEFAULT_STORE = {
   footer: "Terima kasih sudah berbelanja!",
   pin: "1234", // PIN mode manajer (bisa diganti di Pengaturan)
   paper: 58, // 58 atau 80 mm
-  method: "browser", // "browser" | "serial"
+  method: "browser", // "browser" | "bluetooth" | "serial"
 };
 
 // ===== Cetak langsung ESC/POS via Web Serial (opsional) =====
@@ -284,14 +284,86 @@ const escposReceipt = (store, d) => {
   return s;
 };
 
+// Ubah teks ke ASCII aman untuk printer thermal (hindari karakter rusak)
+const asciiFold = (str) => str
+  .replace(/[·•]/g, "-").replace(/[—–]/g, "-").replace(/×/g, "x")
+  .replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/…/g, "...")
+  .replace(/[✓✔]/g, "v").replace(/[^\x00-\x7E]/g, "");
+
+// String ESC/POS -> Uint8Array (byte kontrol tetap utuh)
+const escposBytes = (store, d) => {
+  const s = asciiFold(escposReceipt(store, d));
+  const bytes = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i) & 0xFF;
+  return bytes;
+};
+
 const printViaSerial = async (store, d) => {
   if (!("serial" in navigator)) throw new Error("Web Serial tidak didukung browser ini");
   const port = await navigator.serial.requestPort();
   await port.open({ baudRate: 9600 });
   const writer = port.writable.getWriter();
-  await writer.write(new TextEncoder().encode(escposReceipt(store, d)));
+  await writer.write(escposBytes(store, d));
   writer.releaseLock();
   await port.close();
+};
+
+/* ===== Cetak via Bluetooth (Web Bluetooth — Chrome di Android/ChromeOS) ===== */
+// UUID layanan umum pada printer thermal BLE 58/80mm
+const BT_SERVICES = [
+  0x18f0, 0xff00, 0xffe0, 0xff80,
+  "000018f0-0000-1000-8000-00805f9b34fb",
+  "0000ff00-0000-1000-8000-00805f9b34fb",
+  "0000ffe0-0000-1000-8000-00805f9b34fb",
+  "49535343-fe7d-4ae5-8fa9-9fafd205e455",
+  "6e400001-b5a3-f393-e0a9-e50e24dcca9e",
+];
+let btDevice = null, btChar = null;
+
+const findWritable = async (server) => {
+  const services = await server.getPrimaryServices();
+  for (const svc of services) {
+    let chars = [];
+    try { chars = await svc.getCharacteristics(); } catch (_) { continue; }
+    for (const ch of chars) {
+      if (ch.properties.write || ch.properties.writeWithoutResponse) return ch;
+    }
+  }
+  return null;
+};
+
+const connectBluetoothPrinter = async () => {
+  if (!navigator.bluetooth) throw new Error("Browser ini tidak mendukung Web Bluetooth. Pakai Chrome di Android.");
+  const device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: BT_SERVICES });
+  btDevice = device;
+  device.addEventListener("gattserverdisconnected", () => { btChar = null; });
+  const server = await device.gatt.connect();
+  btChar = await findWritable(server);
+  if (!btChar) throw new Error("Terhubung, tapi saluran cetak tidak ditemukan. Coba printer lain.");
+  return device;
+};
+
+const ensureBtChar = async () => {
+  if (btChar && btDevice?.gatt?.connected) return btChar;
+  if (btDevice) {
+    const server = await btDevice.gatt.connect();
+    btChar = await findWritable(server);
+    if (btChar) return btChar;
+  }
+  throw new Error("Printer Bluetooth belum terhubung. Hubungkan dulu di Pengaturan.");
+};
+
+const printViaBluetooth = async (store, d) => {
+  const ch = await ensureBtChar();
+  const bytes = escposBytes(store, d);
+  const CHUNK = 180;
+  const noResp = ch.properties.writeWithoutResponse;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    const part = bytes.slice(i, i + CHUNK);
+    if (noResp && ch.writeValueWithoutResponse) await ch.writeValueWithoutResponse(part);
+    else await ch.writeValue(part);
+    await new Promise((r) => setTimeout(r, 18));
+  }
 };
 
 /* ============================ Small UI atoms ============================ */
@@ -505,6 +577,7 @@ export default function App() {
   const [shiftStart, setShiftStart] = useState(null);
   const [shiftReport, setShiftReport] = useState(null);
   const [shiftCash, setShiftCash] = useState("");
+  const [btName, setBtName] = useState("");
   const managerMode = role === "manager";
   const [store, setStore] = useState(DEFAULT_STORE);
   const [printReceipt, setPrintReceipt] = useState(null);
@@ -657,6 +730,12 @@ export default function App() {
   // ===== Cetak nota =====
   const nowStamp = () => new Date().toLocaleString("id-ID", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
   const triggerPrint = (data) => {
+    if (store.method === "bluetooth") {
+      printViaBluetooth(store, data)
+        .then(() => flash("Struk terkirim ke printer Bluetooth"))
+        .catch((e) => { console.error(e); flash((e && e.message) ? e.message : "Bluetooth gagal — pakai dialog browser"); setPrintReceipt(data); setTimeout(() => window.print(), 80); });
+      return;
+    }
     if (store.method === "serial") {
       printViaSerial(store, data)
         .then(() => flash("Nota dikirim ke printer"))
@@ -666,6 +745,21 @@ export default function App() {
     setPrintReceipt(data);
     setTimeout(() => window.print(), 80);
   };
+  const connectBt = async () => {
+    try {
+      const dev = await connectBluetoothPrinter();
+      setBtName(dev.name || "Printer Bluetooth");
+      flash("Printer Bluetooth terhubung");
+    } catch (e) {
+      console.error(e);
+      flash((e && e.message) ? e.message : "Gagal menghubungkan Bluetooth");
+    }
+  };
+  const testPrint = () => triggerPrint({
+    kind: "jual", no: "TES-CETAK", date: nowStamp(), cashier: cashierName || "Manajer",
+    items: [{ name: "Tes Cetak Struk", qtyLabel: "1", lineTotal: 0 }],
+    total: 0, methodLabel: "Tes", paid: 0, change: 0,
+  });
   const buildSaleReceipt = (total, method, meta) => {
     const no = "INV-" + String(invSeq).padStart(5, "0");
     setInvSeq((s) => s + 1);
@@ -911,16 +1005,34 @@ export default function App() {
             </div>
           </label>
           <label className="fld"><span>Metode cetak</span>
-            <div className="seg">
+            <div className="seg seg-3">
               <button type="button" className={store.method === "browser" ? "on" : ""} onClick={() => setStore((s) => ({ ...s, method: "browser" }))}>Dialog browser</button>
-              <button type="button" className={store.method === "serial" ? "on" : ""} onClick={() => setStore((s) => ({ ...s, method: "serial" }))}>Langsung USB/Serial</button>
+              <button type="button" className={store.method === "bluetooth" ? "on" : ""} onClick={() => setStore((s) => ({ ...s, method: "bluetooth" }))}>Bluetooth</button>
+              <button type="button" className={store.method === "serial" ? "on" : ""} onClick={() => setStore((s) => ({ ...s, method: "serial" }))}>USB/Serial</button>
             </div>
             <span className="hint">
               {store.method === "browser"
-                ? "Cetak lewat dialog browser — pilih printer thermal yang sudah terpasang di komputer. Paling kompatibel."
-                : "Kirim ESC/POS langsung ke printer (Chrome/Edge). Cocok untuk printer USB/serial; jika gagal otomatis kembali ke dialog browser."}
+                ? "Cetak lewat dialog browser — pilih printer thermal yang sudah terpasang. Paling kompatibel (semua perangkat)."
+                : store.method === "bluetooth"
+                ? "Untuk tablet/HP: kirim langsung ke printer thermal Bluetooth (ESC/POS). Didukung Chrome di Android & ChromeOS. iPad/iPhone belum mendukung Web Bluetooth — pakai dialog browser."
+                : "Kirim ESC/POS langsung ke printer (Chrome/Edge desktop). Cocok untuk printer USB/serial; jika gagal otomatis kembali ke dialog browser."}
             </span>
           </label>
+
+          {store.method === "bluetooth" && (
+            <div className="bt-box">
+              <div className="bt-status">
+                <span className={`bt-dot ${btName ? "on" : ""}`} />
+                {btName ? <span>Terhubung: <b>{btName}</b></span> : <span className="muted">Belum terhubung ke printer</span>}
+              </div>
+              <div className="bt-actions">
+                <button type="button" className="btn sm" onClick={connectBt}><Bluetooth size={15} /> {btName ? "Hubungkan ulang" : "Hubungkan printer"}</button>
+                <button type="button" className="btn ghost sm" disabled={!btName} onClick={testPrint}><Printer size={14} /> Tes cetak</button>
+              </div>
+              <span className="hint">Tekan “Hubungkan printer”, pilih printer dari daftar Bluetooth, lalu “Tes cetak”. Pairing perlu diulang setiap kali aplikasi dibuka ulang (aturan keamanan browser).</span>
+            </div>
+          )}
+
           <button className="btn ghost full" onClick={() => triggerPrint({
             kind: "jual", no: "INV-CONTOH", date: nowStamp(), cashier: "Manajer",
             items: [{ name: "Dripp Syrup Caramel 760ml", qtyLabel: "1 karton", lineTotal: 690000 }, { name: "Masterista Powder Original Matcha 800g", qtyLabel: "2 pcs", lineTotal: 390000 }],
@@ -2854,6 +2966,12 @@ function Style() {
       .seg button{flex:1;border:none;background:none;padding:9px;border-radius:8px;font:inherit;font-weight:600;
         font-size:13.5px;color:var(--ink-soft);cursor:pointer}
       .seg button.on{background:var(--surface);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.08)}
+      .seg.seg-3 button{font-size:12.5px;padding:9px 4px}
+      .bt-box{display:flex;flex-direction:column;gap:10px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-sm);padding:13px}
+      .bt-status{display:flex;align-items:center;gap:9px;font-size:13.5px}
+      .bt-dot{width:9px;height:9px;border-radius:50%;background:var(--ink-faint);flex-shrink:0}
+      .bt-dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+      .bt-actions{display:flex;gap:9px;flex-wrap:wrap}
       .fld{display:flex;flex-direction:column;gap:7px}
       .fld>span{font-size:13px;font-weight:500;color:var(--ink-soft)}
       .fld input{border:1px solid var(--line);border-radius:9px;padding:10px 12px;font:inherit;font-size:14px;outline:none}
