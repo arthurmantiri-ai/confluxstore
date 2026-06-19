@@ -129,10 +129,17 @@ export const Sales = {
   async list() {
     const { data, error } = await supabase.from("sales_log").select("*").order("created_at", { ascending: false });
     if (error) throw error;
-    return data.map((r) => ({ id: r.id, productId: r.product_id, qty: Number(r.qty), revenue: Number(r.revenue), cost: Number(r.cost), date: r.date }));
+    return data.map((r) => ({
+      id: r.id, productId: r.product_id, qty: Number(r.qty), revenue: Number(r.revenue), cost: Number(r.cost),
+      date: r.date, ts: r.created_at ? Date.parse(r.created_at) : null,
+      txnId: r.txn_id || null, cashier: r.cashier || null, method: r.method || null,
+    }));
   },
   async create(s) {
-    const { error } = await supabase.from("sales_log").insert({ product_id: s.productId, qty: s.qty, revenue: s.revenue, cost: s.cost, date: s.date });
+    const { error } = await supabase.from("sales_log").insert({
+      product_id: s.productId, qty: s.qty, revenue: s.revenue, cost: s.cost, date: s.date,
+      txn_id: s.txnId || null, cashier: s.cashier || null, method: s.method || null,
+    });
     if (error) throw error;
   },
 };

@@ -10,7 +10,7 @@ import {
   Lock, Unlock, ShieldCheck, Calculator, ArrowRight,
   Phone, Building2, User, CheckCircle2, Printer, Settings, LogOut,
   LineChart, BarChart3, Coins, Hammer, Download, Calendar,
-  Bean, Droplets, CupSoda, Coffee, LayoutGrid
+  Bean, Droplets, CupSoda, Coffee, LayoutGrid, History, Wallet2
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -207,6 +207,7 @@ const NAV = [
   { key: "restok", label: "Re-stok", icon: RefreshCcw, roles: ["manager"] },
   { key: "simulasi", label: "Simulasi Stok", icon: Calculator, roles: ["manager"] },
   { key: "akuntansi", label: "Akuntansi", icon: LineChart, roles: ["manager"] },
+  { key: "riwayat", label: "Riwayat Penjualan", icon: History, roles: ["manager"] },
 ];
 
 const PAY_METHODS = [
@@ -404,10 +405,12 @@ function Receipt({ store, data }) {
 }
 
 function RoleGate({ onEnter, pin: managerPin }) {
-  const [mode, setMode] = useState(null); // null | "manager"
+  const [mode, setMode] = useState(null); // null | "cashier" | "manager"
   const [pin, setPin] = useState("");
+  const [name, setName] = useState("");
   const [err, setErr] = useState(false);
   const submit = () => { if (pin === (managerPin || MANAGER_PIN)) onEnter("manager"); else setErr(true); };
+  const enterCashier = () => { if (name.trim()) onEnter("cashier", name.trim()); };
 
   return (
     <div className="gate">
@@ -436,9 +439,9 @@ function RoleGate({ onEnter, pin: managerPin }) {
         <div className="gate-title">CONFLUX</div>
         <div className="gate-sub">Coffee Club · Sistem Toko</div>
 
-        {mode !== "manager" ? (
+        {mode === null ? (
           <div className="gate-roles">
-            <button className="gate-role" onClick={() => onEnter("cashier")}>
+            <button className="gate-role" onClick={() => { setMode("cashier"); setName(""); }}>
               <div className="gate-ic cashier"><ShoppingCart size={22} /></div>
               <b>Kasir</b><span>Untuk karyawan — input penjualan</span>
             </button>
@@ -447,6 +450,20 @@ function RoleGate({ onEnter, pin: managerPin }) {
               <b>Manajer</b><span>Kelola stok, laporan & pengaturan</span>
               <span className="gate-lock"><Lock size={12} /> PIN</span>
             </button>
+          </div>
+        ) : mode === "cashier" ? (
+          <div className="gate-pin">
+            <div className="gate-pin-label"><User size={15} /> Nama kasir hari ini</div>
+            <input
+              className="pin-input" type="text" autoFocus placeholder="cth. Rani"
+              value={name} onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") enterCashier(); }}
+            />
+            <div className="gate-pin-actions">
+              <button className="btn ghost" onClick={() => { setMode(null); setName(""); }}>Kembali</button>
+              <button className="btn" disabled={!name.trim()} onClick={enterCashier}><ArrowRight size={15} /> Masuk</button>
+            </div>
+            <div className="pin-hint">Nama ini menempel pada setiap transaksi & struk Anda.</div>
           </div>
         ) : (
           <div className="gate-pin">
@@ -477,7 +494,6 @@ export default function App() {
   const [products, setProducts] = useState(SEED_PRODUCTS);
   const [movements, setMovements] = useState(SEED_MOVEMENTS);
   const [orders, setOrders] = useState(SEED_ORDERS);
-  const [sales7, setSales7] = useState(SEED_SALES7);
   const [debts, setDebts] = useState(SEED_DEBTS);
   const [capital, setCapital] = useState(SEED_CAPITAL);
   const [expenses, setExpenses] = useState(SEED_EXPENSES);
@@ -485,6 +501,10 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [role, setRole] = useState(null); // null = belum login, "cashier" | "manager"
+  const [cashierName, setCashierName] = useState("");
+  const [shiftStart, setShiftStart] = useState(null);
+  const [shiftReport, setShiftReport] = useState(null);
+  const [shiftCash, setShiftCash] = useState("");
   const managerMode = role === "manager";
   const [store, setStore] = useState(DEFAULT_STORE);
   const [printReceipt, setPrintReceipt] = useState(null);
@@ -529,8 +549,21 @@ export default function App() {
     persist(() => Products.setStock(productId, newStock));
   };
 
-  const addSale = (amount) => {
-    setSales7((s) => s.map((d, i) => (i === s.length - 1 ? { ...d, v: d.v + amount } : d)));
+  const logout = () => { setRole(null); setSidebarOpen(false); setShiftReport(null); };
+
+  // Ringkasan shift kasir (anti-kecurangan): transaksi kasir ini sejak login
+  const buildShiftReport = () => {
+    const mine = salesLog.filter((s) => s.txnId && s.cashier === cashierName && (s.ts == null || s.ts >= (shiftStart || 0)));
+    const txnIds = [...new Set(mine.map((s) => s.txnId))];
+    const byMethod = {};
+    mine.forEach((s) => { const m = s.method || "-"; byMethod[m] = (byMethod[m] || 0) + s.revenue; });
+    const total = mine.reduce((a, s) => a + s.revenue, 0);
+    const items = mine.reduce((a, s) => a + s.qty, 0);
+    return { cashier: cashierName, start: shiftStart, count: txnIds.length, total, items, byMethod, cash: byMethod.cash || 0 };
+  };
+  const requestLogout = () => {
+    if (role === "cashier") setShiftReport(buildShiftReport());
+    else logout();
   };
 
   const addProduct = async (data) => {
@@ -571,8 +604,6 @@ export default function App() {
     flash(`${p?.code || "Barang"} dihapus`);
   };
 
-  const logout = () => { setRole(null); setSidebarOpen(false); };
-
   const createOrder = async (data) => {
     const total = data.items.reduce((a, it) => a + (pById(it.pid)?.price || 0) * it.qty, 0);
     const id = nextOrderId(orders);
@@ -583,9 +614,12 @@ export default function App() {
   };
 
   // ===== Akuntansi =====
-  const recordSale = (pid, qty, revenue) => {
+  const recordSale = (pid, qty, revenue, ctx = {}) => {
     const p = products.find((x) => x.id === pid);
-    const rec = { productId: pid, qty, revenue, cost: (p?.cost || 0) * qty, date: "Hari ini" };
+    const rec = {
+      productId: pid, qty, revenue, cost: (p?.cost || 0) * qty, date: "Hari ini",
+      ts: Date.now(), txnId: ctx.txnId || null, cashier: ctx.cashier || null, method: ctx.method || null,
+    };
     setSalesLog((sl) => [{ id: uid(), ...rec }, ...sl]);
     persist(() => Sales.create(rec));
   };
@@ -637,14 +671,14 @@ export default function App() {
     setInvSeq((s) => s + 1);
     return {
       kind: method === "hutang" ? "hutang" : "jual",
-      no, date: nowStamp(), cashier: "Kasir 01",
+      no, date: nowStamp(), cashier: cashierName || "Kasir",
       items: meta.items || [], total, methodLabel: PAY_LABEL[method] || method,
       paid: meta.paid, change: meta.change,
       debtor: meta.debtor, business: meta.business, phone: meta.phone,
     };
   };
   const debtToReceipt = (d) => ({
-    kind: "hutang", no: d.id, date: d.date, cashier: "Kasir 01",
+    kind: "hutang", no: d.id, date: d.date, cashier: cashierName || "Kasir",
     items: d.items, total: d.total, debtor: d.debtor, business: d.business, phone: d.phone,
   });
 
@@ -667,11 +701,31 @@ export default function App() {
   const newOrders = orders.filter((o) => o.status === "baru").length;
   const unpaidDebts = debts.filter((d) => d.status === "belum").length;
 
+  // Chart 7 hari + penjualan hari ini, dari transaksi nyata (txnId terisi)
+  const salesChart = useMemo(() => {
+    const days = [];
+    const now = new Date();
+    for (let i = 6; i >= 0; i--) {
+      const dd = new Date(now); dd.setDate(now.getDate() - i);
+      days.push({ key: dd.toDateString(), d: dd.toLocaleDateString("id-ID", { weekday: "short" }), v: 0 });
+    }
+    const map = Object.fromEntries(days.map((x) => [x.key, x]));
+    salesLog.forEach((s) => {
+      if (!s.txnId || s.ts == null) return;
+      const k = new Date(s.ts).toDateString();
+      if (map[k]) map[k].v += s.revenue;
+    });
+    return days;
+  }, [salesLog]);
+  const todayRev = salesChart[6]?.v || 0;
+  const yRev = salesChart[5]?.v || 0;
+  const deltaPct = yRev ? Math.round(((todayRev - yRev) / yRev) * 100) : 0;
+
   if (!role) {
     return (
       <>
         <Style />
-        <RoleGate onEnter={(r) => { setRole(r); setView(r === "manager" ? "dashboard" : "kasir"); }} pin={store.pin || MANAGER_PIN} />
+        <RoleGate onEnter={(r, name) => { setRole(r); setView(r === "manager" ? "dashboard" : "kasir"); setCashierName(r === "manager" ? "Manajer" : (name || "Kasir")); setShiftStart(Date.now()); }} pin={store.pin || MANAGER_PIN} />
       </>
     );
   }
@@ -712,9 +766,9 @@ export default function App() {
         <div className="sidebar-foot">
           <div className={`role-badge ${role}`}>
             {role === "manager" ? <ShieldCheck size={14} /> : <ShoppingCart size={14} />}
-            {role === "manager" ? "Mode Manajer" : "Mode Kasir"}
+            {role === "manager" ? "Mode Manajer" : `Kasir: ${cashierName || "—"}`}
           </div>
-          <button className="logout-btn" onClick={logout}><LogOut size={15} /> Keluar / ganti</button>
+          <button className="logout-btn" onClick={requestLogout}><LogOut size={15} /> Keluar / ganti</button>
         </div>
       </aside>
 
@@ -739,10 +793,13 @@ export default function App() {
         <div className="content">
           {view === "dashboard" && (
             <Dashboard
-              products={products} sales7={sales7} lowStock={lowStock}
+              products={products} chart={salesChart} todayRev={todayRev} deltaPct={deltaPct} lowStock={lowStock}
               inventoryValue={inventoryValue} newOrders={newOrders}
               movements={movements} pById={pById} setView={setView}
             />
+          )}
+          {view === "riwayat" && (
+            <SalesHistory salesLog={salesLog} products={products} />
           )}
           {view === "stok" && (
             <Inventory products={products} movements={movements} pById={pById}
@@ -753,9 +810,9 @@ export default function App() {
           {view === "kasir" && (
             <Kasir products={products}
               onCheckout={(lines, total, method, meta) => {
+                const txnId = uid();
                 lines.forEach((l) => recordMovement(l.pid, "out", l.qty, `Penjualan kasir (${PAY_LABEL[method]})`));
-                addSale(total);
-                (meta.items || []).forEach((it) => recordSale(it.pid, it.qty, it.lineTotal));
+                (meta.items || []).forEach((it) => recordSale(it.pid, it.qty, it.lineTotal, { txnId, cashier: cashierName || "Kasir", method }));
                 if (method === "hutang") { addDebt(meta, total); flash(`Hutang ${rp(total)} dicatat — ${meta?.debtor || "Pelanggan"}`); }
                 else flash(`Pembayaran ${rp(total)} via ${PAY_LABEL[method]} berhasil`);
                 setPrintReceipt(buildSaleReceipt(total, method, meta));
@@ -768,8 +825,9 @@ export default function App() {
               onStatus={(id, status) => persist(() => OrdersApi.setStatus(id, status))}
               onCreate={createOrder}
               onAccept={(o) => {
+                const txnId = uid();
                 o.items.forEach((it) => recordMovement(it.pid, "out", it.qty, `Order ${o.id}`));
-                o.items.forEach((it) => { const p = pById(it.pid); if (p) recordSale(it.pid, it.qty, p.price * it.qty); });
+                o.items.forEach((it) => { const p = pById(it.pid); if (p) recordSale(it.pid, it.qty, p.price * it.qty, { txnId, cashier: "Order Online", method: "order" }); });
                 flash(`${o.id} diterima & stok dipotong`);
               }}
               flash={flash}
@@ -864,7 +922,7 @@ export default function App() {
             </span>
           </label>
           <button className="btn ghost full" onClick={() => triggerPrint({
-            kind: "jual", no: "INV-CONTOH", date: nowStamp(), cashier: "Kasir 01",
+            kind: "jual", no: "INV-CONTOH", date: nowStamp(), cashier: "Manajer",
             items: [{ name: "Dripp Syrup Caramel 760ml", qtyLabel: "1 karton", lineTotal: 690000 }, { name: "Masterista Powder Original Matcha 800g", qtyLabel: "2 pcs", lineTotal: 390000 }],
             total: 1080000, methodLabel: "Tunai", paid: 1100000, change: 20000,
           })}><Printer size={15} /> Cetak nota contoh</button>
@@ -877,6 +935,57 @@ export default function App() {
         <Receipt store={store} data={printReceipt} />
       </div>
 
+      <Modal
+        open={!!shiftReport}
+        onClose={() => setShiftReport(null)}
+        width={460}
+        title="Ringkasan Shift Kasir"
+        footer={<>
+          <button className="btn ghost" onClick={() => setShiftReport(null)}>Batal</button>
+          <button className="btn" onClick={() => { setShiftCash(""); logout(); }}><LogOut size={15} /> Keluar</button>
+        </>}
+      >
+        {shiftReport && (() => {
+          const counted = Number(String(shiftCash).replace(/\D/g, "")) || 0;
+          const selisih = counted - shiftReport.cash;
+          return (
+            <div className="shift">
+              <div className="shift-head">
+                <div className="shift-ava">{(shiftReport.cashier[0] || "?").toUpperCase()}</div>
+                <div>
+                  <div className="shift-name">{shiftReport.cashier}</div>
+                  <div className="muted xs">Sesi sejak {shiftReport.start ? new Date(shiftReport.start).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }) : "—"}</div>
+                </div>
+              </div>
+              <div className="shift-stats">
+                <div className="shift-stat"><span>Transaksi</span><b>{shiftReport.count}</b></div>
+                <div className="shift-stat"><span>Barang</span><b>{shiftReport.items}</b></div>
+                <div className="shift-stat"><span>Total</span><b>{rp(shiftReport.total)}</b></div>
+              </div>
+              {Object.keys(shiftReport.byMethod).length > 0 && (
+                <div className="shift-methods">
+                  {Object.entries(shiftReport.byMethod).map(([m, v]) => (
+                    <div key={m} className="shift-row"><span>{PAY_LABEL[m] || m}</span><span className="tab">{rp(v)}</span></div>
+                  ))}
+                </div>
+              )}
+              <div className="shift-recon">
+                <div className="shift-row strong"><span>Tunai diharapkan di laci</span><span className="tab">{rp(shiftReport.cash)}</span></div>
+                <label className="fld"><span>Tunai dihitung (opsional)</span>
+                  <input inputMode="numeric" value={shiftCash} placeholder="hitung uang fisik di laci"
+                    onChange={(e) => setShiftCash(e.target.value)} /></label>
+                {shiftCash !== "" && (
+                  <div className={`shift-diff ${selisih === 0 ? "ok" : selisih > 0 ? "over" : "short"}`}>
+                    {selisih === 0 ? "Cocok ✓" : selisih > 0 ? `Lebih ${rp(selisih)}` : `Kurang ${rp(Math.abs(selisih))}`}
+                  </div>
+                )}
+              </div>
+              <div className="muted xs">Catat selisih untuk serah terima. Manajer melihat seluruh transaksi di menu Riwayat Penjualan.</div>
+            </div>
+          );
+        })()}
+      </Modal>
+
       <Toast msg={toast} />
     </div>
   );
@@ -884,10 +993,10 @@ export default function App() {
 
 /* ============================ Dashboard ============================ */
 
-function Dashboard({ products, sales7, lowStock, inventoryValue, newOrders, movements, pById, setView }) {
-  const todaySales = sales7[sales7.length - 1].v;
-  const yesterday = sales7[sales7.length - 2].v;
-  const delta = yesterday ? Math.round(((todaySales - yesterday) / yesterday) * 100) : 0;
+function Dashboard({ products, chart, todayRev, deltaPct, lowStock, inventoryValue, newOrders, movements, pById, setView }) {
+  const todaySales = todayRev;
+  const delta = deltaPct;
+  const weekTotal = chart.reduce((a, d) => a + d.v, 0);
 
   return (
     <div className="stack">
@@ -903,11 +1012,12 @@ function Dashboard({ products, sales7, lowStock, inventoryValue, newOrders, move
         <section className="card">
           <div className="card-head">
             <h2>Penjualan 7 hari</h2>
-            <span className="muted">Total {rp(sales7.reduce((a, d) => a + d.v, 0))}</span>
+            <span className="muted">Total {rp(weekTotal)}</span>
           </div>
           <div className="chart-wrap">
+            {weekTotal === 0 && <div className="chart-empty">Belum ada penjualan dalam 7 hari terakhir. Grafik akan terisi otomatis dari transaksi kasir.</div>}
             <ResponsiveContainer width="100%" height={240}>
-              <AreaChart data={sales7} margin={{ top: 8, right: 8, left: -10, bottom: 0 }}>
+              <AreaChart data={chart} margin={{ top: 8, right: 8, left: -10, bottom: 0 }}>
                 <defs>
                   <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor="#E2514D" stopOpacity={0.22} />
@@ -916,7 +1026,7 @@ function Dashboard({ products, sales7, lowStock, inventoryValue, newOrders, move
                 </defs>
                 <CartesianGrid stroke="#2C3A33" vertical={false} />
                 <XAxis dataKey="d" tickLine={false} axisLine={false} tick={{ fill: "#6F8077", fontSize: 12 }} />
-                <YAxis tickFormatter={(v) => `${v / 1000000}jt`} tickLine={false} axisLine={false} tick={{ fill: "#6F8077", fontSize: 12 }} width={44} />
+                <YAxis tickFormatter={(v) => (v >= 1000000 ? `${(v / 1000000).toFixed(1)}jt` : v >= 1000 ? `${Math.round(v / 1000)}rb` : v)} tickLine={false} axisLine={false} tick={{ fill: "#6F8077", fontSize: 12 }} width={44} />
                 <Tooltip formatter={(v) => rp(v)} contentStyle={{ borderRadius: 12, border: "1px solid #2C3A33", background: "#1B2521", color: "#ECE7DA", fontFamily: "Inter", fontSize: 13 }} labelStyle={{ color: "#9DAEA3" }} itemStyle={{ color: "#ECE7DA" }} />
                 <Area type="monotone" dataKey="v" stroke="#E2514D" strokeWidth={2.4} fill="url(#g)" />
               </AreaChart>
@@ -963,6 +1073,97 @@ function Dashboard({ products, sales7, lowStock, inventoryValue, newOrders, move
             })}
           </tbody>
         </table>
+      </section>
+    </div>
+  );
+}
+
+/* ============================ Riwayat Penjualan ============================ */
+
+function SalesHistory({ salesLog, products }) {
+  const [range, setRange] = useState("today"); // today | all
+  const [open, setOpen] = useState({});
+  const pName = (id) => products.find((p) => p.id === id)?.name || "Barang";
+
+  // Kelompokkan baris per transaksi (txnId)
+  const txns = useMemo(() => {
+    const map = {};
+    salesLog.forEach((s) => {
+      if (!s.txnId) return;
+      if (!map[s.txnId]) map[s.txnId] = { txnId: s.txnId, ts: s.ts, cashier: s.cashier || "—", method: s.method || "-", items: [], total: 0, qty: 0 };
+      const t = map[s.txnId];
+      t.items.push({ name: pName(s.productId), qty: s.qty, lineTotal: s.revenue });
+      t.total += s.revenue; t.qty += s.qty;
+      if (s.ts && (!t.ts || s.ts < t.ts)) t.ts = s.ts;
+    });
+    return Object.values(map).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  }, [salesLog, products]);
+
+  const isToday = (ts) => ts && new Date(ts).toDateString() === new Date().toDateString();
+  const list = range === "today" ? txns.filter((t) => isToday(t.ts)) : txns;
+
+  const total = list.reduce((a, t) => a + t.total, 0);
+  const byCashier = {};
+  list.forEach((t) => { byCashier[t.cashier] = (byCashier[t.cashier] || 0) + t.total; });
+  const byMethod = {};
+  list.forEach((t) => { byMethod[t.method] = (byMethod[t.method] || 0) + t.total; });
+
+  const fmtTime = (ts) => ts ? new Date(ts).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+
+  return (
+    <div className="stack">
+      <div className="acc-toolbar">
+        <div className="seg">
+          <button className={`seg-btn ${range === "today" ? "on" : ""}`} onClick={() => setRange("today")}>Hari ini</button>
+          <button className={`seg-btn ${range === "all" ? "on" : ""}`} onClick={() => setRange("all")}>Semua</button>
+        </div>
+        <div className="muted" style={{ fontSize: 13 }}>{list.length} transaksi · {rp(total)}</div>
+      </div>
+
+      <div className="grid-4">
+        <Stat icon={Wallet} accent label={range === "today" ? "Penjualan hari ini" : "Total penjualan"} value={rp(total)} sub={`${list.length} transaksi`} />
+        <Stat icon={ShoppingCart} label="Barang terjual" value={num(list.reduce((a, t) => a + t.qty, 0))} sub="total unit" />
+        <Stat icon={Banknote} label="Tunai" value={rp(byMethod.cash || 0)} sub="metode tunai" />
+        <Stat icon={Landmark} label="Non-tunai" value={rp(total - (byMethod.cash || 0))} sub="transfer/qris/kartu/order" />
+      </div>
+
+      <section className="card">
+        <div className="card-head"><h2>Penjualan per kasir</h2></div>
+        <div className="cashier-chips">
+          {Object.keys(byCashier).length === 0 && <div className="empty">Belum ada transaksi.</div>}
+          {Object.entries(byCashier).sort((a, b) => b[1] - a[1]).map(([c, v]) => (
+            <div key={c} className="cashier-chip">
+              <div className="cc-ava">{(c[0] || "?").toUpperCase()}</div>
+              <div><div className="cc-name">{c}</div><div className="cc-val">{rp(v)}</div></div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="card-head"><h2>Daftar transaksi</h2><span className="muted">Hanya bisa dilihat manajer</span></div>
+        <div className="txn-list">
+          {list.length === 0 && <div className="empty">Belum ada transaksi pada periode ini.</div>}
+          {list.map((t) => (
+            <div key={t.txnId} className={`txn ${open[t.txnId] ? "open" : ""}`}>
+              <button className="txn-head" onClick={() => setOpen((o) => ({ ...o, [t.txnId]: !o[t.txnId] }))}>
+                <div className="txn-time">{fmtTime(t.ts)}</div>
+                <div className="txn-cashier"><User size={12} /> {t.cashier}</div>
+                <div className={`txn-method m-${t.method}`}>{PAY_LABEL[t.method] || t.method}</div>
+                <div className="txn-qty">{t.qty} brg</div>
+                <div className="txn-total">{rp(t.total)}</div>
+                <ChevronRight size={15} className="txn-caret" />
+              </button>
+              {open[t.txnId] && (
+                <div className="txn-items">
+                  {t.items.map((it, i) => (
+                    <div key={i} className="txn-item"><span>{it.qty}× {it.name}</span><span className="tab">{rp(it.lineTotal)}</span></div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       </section>
     </div>
   );
@@ -2847,6 +3048,62 @@ function Style() {
       .order-line.grand{border-bottom:none;border-top:2px solid var(--line);margin-top:2px;padding-top:9px;font-weight:700}
       .order-line.grand b{font-family:'Space Grotesk'}
       .done-tag{display:inline-flex;align-items:center;gap:4px;color:var(--ok);font-weight:600;font-size:13px}
+
+      /* ===== Riwayat Penjualan ===== */
+      .chart-empty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:0 24px;
+        color:var(--ink-faint);font-size:13px;z-index:1;pointer-events:none}
+      .chart-wrap{position:relative}
+      .cashier-chips{display:flex;flex-wrap:wrap;gap:10px}
+      .cashier-chip{display:flex;align-items:center;gap:10px;background:var(--surface-2);border:1px solid var(--line);
+        border-radius:var(--r-sm);padding:9px 14px 9px 9px}
+      .cc-ava{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:14px;
+        color:var(--bg);background:linear-gradient(145deg,var(--teal),var(--accent))}
+      .cc-name{font-weight:600;font-size:13.5px}
+      .cc-val{font-family:'Space Grotesk';font-weight:600;color:var(--accent);font-size:13px}
+      .txn-list{display:flex;flex-direction:column;gap:7px}
+      .txn{border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface-2);overflow:hidden}
+      .txn.open{border-color:rgba(236,231,218,.18)}
+      .txn-head{width:100%;display:grid;grid-template-columns:auto 1fr auto auto auto auto;gap:12px;align-items:center;
+        background:none;border:none;font:inherit;color:var(--ink);padding:11px 14px;cursor:pointer;text-align:left}
+      .txn-head:hover{background:var(--surface-3)}
+      .txn-time{font-size:12.5px;color:var(--ink-soft);white-space:nowrap}
+      .txn-cashier{display:inline-flex;align-items:center;gap:4px;font-size:12.5px;font-weight:600;color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .txn-cashier svg{color:var(--teal);flex-shrink:0}
+      .txn-method{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:var(--ink-soft);
+        background:var(--surface);border:1px solid var(--line);padding:2px 8px;border-radius:999px;white-space:nowrap}
+      .txn-method.m-cash{color:var(--ok);background:var(--ok-bg);border-color:transparent}
+      .txn-method.m-order{color:var(--teal);background:var(--teal-soft);border-color:transparent}
+      .txn-qty{font-size:12px;color:var(--ink-faint);white-space:nowrap}
+      .txn-total{font-family:'Space Grotesk';font-weight:700;font-size:14px;white-space:nowrap}
+      .txn-caret{color:var(--ink-faint);transition:transform .18s var(--ease)}
+      .txn.open .txn-caret{transform:rotate(90deg)}
+      .txn-items{padding:4px 14px 12px 14px;display:flex;flex-direction:column;gap:5px;border-top:1px dashed var(--line-soft)}
+      .txn-item{display:flex;justify-content:space-between;gap:12px;font-size:13px;color:var(--ink-soft);padding-top:6px}
+      .txn-item .tab,.shift-row .tab{font-family:'Space Grotesk';font-weight:600;color:var(--ink)}
+      @media (max-width:640px){
+        .txn-head{grid-template-columns:1fr auto auto;grid-auto-rows:auto;gap:6px 10px}
+        .txn-time{grid-column:1/-1}
+        .txn-qty{display:none}
+      }
+
+      /* ===== Ringkasan Shift ===== */
+      .shift{display:flex;flex-direction:column;gap:14px}
+      .shift-head{display:flex;align-items:center;gap:12px}
+      .shift-ava{width:44px;height:44px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:18px;
+        color:var(--bg);background:linear-gradient(145deg,var(--teal),var(--accent))}
+      .shift-name{font-weight:700;font-size:16px}
+      .shift-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+      .shift-stat{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-sm);padding:11px;text-align:center}
+      .shift-stat span{display:block;font-size:11px;color:var(--ink-faint);margin-bottom:3px}
+      .shift-stat b{font-family:'Space Grotesk';font-size:16px}
+      .shift-methods{display:flex;flex-direction:column;gap:5px;background:var(--surface-2);border-radius:var(--r-sm);padding:10px 14px}
+      .shift-row{display:flex;justify-content:space-between;font-size:13.5px;color:var(--ink-soft)}
+      .shift-row.strong{font-weight:700;color:var(--ink)}
+      .shift-recon{display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--line);padding-top:12px}
+      .shift-diff{text-align:center;font-weight:700;padding:9px;border-radius:var(--r-sm);font-size:14px}
+      .shift-diff.ok{color:var(--ok);background:var(--ok-bg)}
+      .shift-diff.over{color:var(--gold);background:var(--warn-bg)}
+      .shift-diff.short{color:var(--crit);background:var(--crit-bg)}
 
       .auto-tag{font-size:9.5px;font-weight:700;letter-spacing:.04em;color:var(--teal);background:var(--teal-soft);
         padding:1px 6px;border-radius:5px;margin-left:5px;vertical-align:middle}
