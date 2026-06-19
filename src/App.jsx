@@ -156,6 +156,22 @@ const nextDebtId = (ds) => {
   return "HTG-" + String(max + 1).padStart(3, "0");
 };
 
+const nextOrderId = (os) => {
+  const max = os.reduce((m, o) => {
+    const n = parseInt(String(o.id || "").replace(/\D/g, ""), 10);
+    return isNaN(n) ? m : Math.max(m, n);
+  }, 1000);
+  return "ORD-" + String(max + 1);
+};
+
+// Buka chat WhatsApp dengan pesan siap-kirim (nomor Indonesia otomatis dinormalkan)
+const waLink = (phone, text) => {
+  let p = String(phone || "").replace(/\D/g, "");
+  if (p.startsWith("0")) p = "62" + p.slice(1);
+  else if (p.startsWith("8")) p = "62" + p;
+  return `https://wa.me/${p}?text=${encodeURIComponent(text)}`;
+};
+
 // ===== Akuntansi =====
 const SEED_CAPITAL = [
   { id: uid(), name: "Renovasi & interior kedai", amount: 45000000, date: "Modal awal" },
@@ -212,7 +228,7 @@ const catIcon = (category = "") => {
 
 // PIN manajer untuk membuka kunci edit & hapus barang.
 // (Demo: nanti diganti otentikasi berbasis peran lewat Supabase Auth)
-const MANAGER_PIN = "170626";
+const MANAGER_PIN = "1234";
 
 // Profil toko untuk header nota (bisa diubah di Pengaturan Nota)
 const DEFAULT_STORE = {
@@ -221,6 +237,7 @@ const DEFAULT_STORE = {
   addr2: "Brewing Connection, One Cup at a Time",
   phone: "@conflux.coffee",
   footer: "Terima kasih sudah berbelanja!",
+  pin: "1234", // PIN mode manajer (bisa diganti di Pengaturan)
   paper: 58, // 58 atau 80 mm
   method: "browser", // "browser" | "serial"
 };
@@ -344,23 +361,26 @@ function Receipt({ store, data }) {
   const d = data;
   return (
     <div className={`receipt ${store.paper === 80 ? "w80" : ""}`}>
+      <img className="r-logo" src={LOGO} alt="" />
       <div className="r-center r-store">{store.name}</div>
       <div className="r-center r-small">{store.addr1}</div>
-      {store.addr2 && <div className="r-center r-small">{store.addr2}</div>}
+      {store.addr2 && <div className="r-center r-tag">{store.addr2}</div>}
       {store.phone && <div className="r-center r-small">{store.phone}</div>}
-      <div className="r-line" />
+      <div className="r-dash" />
       <div className="r-center r-title">{d.kind === "hutang" ? "NOTA HUTANG" : "NOTA PEMBAYARAN"}</div>
-      <div className="r-row r-small"><span>No</span><span>{d.no}</span></div>
-      <div className="r-row r-small"><span>Tanggal</span><span>{d.date}</span></div>
-      <div className="r-row r-small"><span>Kasir</span><span>{d.cashier}</span></div>
-      <div className="r-line" />
+      <div className="r-meta">
+        <div className="r-row r-small"><span>No</span><span>{d.no}</span></div>
+        <div className="r-row r-small"><span>Tanggal</span><span>{d.date}</span></div>
+        <div className="r-row r-small"><span>Kasir</span><span>{d.cashier}</span></div>
+      </div>
+      <div className="r-dash" />
       {d.items.map((it, i) => (
         <div key={i} className="r-item">
           <div className="r-item-name">{it.name}</div>
           <div className="r-row"><span className="r-small">{it.qtyLabel}</span><span>{rp(it.lineTotal)}</span></div>
         </div>
       ))}
-      <div className="r-line" />
+      <div className="r-dash" />
       <div className="r-row r-total"><span>TOTAL</span><span>{rp(d.total)}</span></div>
       {d.kind !== "hutang" ? (
         <>
@@ -375,23 +395,40 @@ function Receipt({ store, data }) {
           {d.phone && <div className="r-row r-small"><span>Telp</span><span>{d.phone}</span></div>}
         </>
       )}
-      <div className="r-line" />
+      <div className="r-dash" />
       <div className="r-center r-foot">{store.footer}</div>
-      <div className="r-center r-foot">{store.phone}</div>
+      <div className="r-center r-brand">CONFLUX COFFEE CLUB</div>
+      <div className="r-center r-small">{store.phone}</div>
     </div>
   );
 }
 
-function RoleGate({ onEnter }) {
+function RoleGate({ onEnter, pin: managerPin }) {
   const [mode, setMode] = useState(null); // null | "manager"
   const [pin, setPin] = useState("");
   const [err, setErr] = useState(false);
-  const submit = () => { if (pin === MANAGER_PIN) onEnter("manager"); else setErr(true); };
+  const submit = () => { if (pin === (managerPin || MANAGER_PIN)) onEnter("manager"); else setErr(true); };
 
   return (
     <div className="gate">
+      <div className="gate-bg" aria-hidden="true">
+        <span className="gate-orb orb-a" />
+        <span className="gate-orb orb-b" />
+        <span className="gate-orb orb-c" />
+        <svg className="gate-bean bean-1" viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2">
+          <ellipse cx="32" cy="32" rx="26" ry="17" transform="rotate(-30 32 32)" /><path d="M16 41C26 31 38 33 48 23" />
+        </svg>
+        <svg className="gate-bean bean-2" viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2">
+          <ellipse cx="32" cy="32" rx="26" ry="17" transform="rotate(-30 32 32)" /><path d="M16 41C26 31 38 33 48 23" />
+        </svg>
+        <svg className="gate-bean bean-3" viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2">
+          <ellipse cx="32" cy="32" rx="26" ry="17" transform="rotate(-30 32 32)" /><path d="M16 41C26 31 38 33 48 23" />
+        </svg>
+        <div className="gate-grain" />
+      </div>
+
       <div className="gate-card">
-        <img className="gate-logo" src={LOGO} alt="Conflux" />
+        <div className="gate-logo-ring"><img className="gate-logo" src={LOGO} alt="Conflux" /></div>
         <div className="gate-title">CONFLUX</div>
         <div className="gate-sub">Coffee Club · Sistem Toko</div>
 
@@ -421,7 +458,6 @@ function RoleGate({ onEnter }) {
               <button className="btn ghost" onClick={() => { setMode(null); setPin(""); setErr(false); }}>Kembali</button>
               <button className="btn" onClick={submit}><Unlock size={15} /> Masuk</button>
             </div>
-            <div className="pin-hint">Demo PIN: <b>1234</b></div>
           </div>
         )}
         <div className="gate-foot">Brewing Connection, One Cup at a Time</div>
@@ -533,6 +569,15 @@ export default function App() {
 
   const logout = () => { setRole(null); setSidebarOpen(false); };
 
+  const createOrder = async (data) => {
+    const total = data.items.reduce((a, it) => a + (pById(it.pid)?.price || 0) * it.qty, 0);
+    const id = nextOrderId(orders);
+    const order = { id, customer: data.customer, phone: data.phone, channel: data.channel, status: "baru", items: data.items, total, at: "Baru saja" };
+    setOrders((os) => [order, ...os]);
+    if (hasSupabase) { try { await OrdersApi.create(order); } catch (e) { console.error("[sync]", e); flash("Order tersimpan lokal — gagal ke server"); } }
+    flash(`Order ${id} dibuat`);
+  };
+
   // ===== Akuntansi =====
   const recordSale = (pid, qty, revenue) => {
     const p = products.find((x) => x.id === pid);
@@ -622,7 +667,7 @@ export default function App() {
     return (
       <>
         <Style />
-        <RoleGate onEnter={(r) => { setRole(r); setView(r === "manager" ? "dashboard" : "kasir"); }} />
+        <RoleGate onEnter={(r) => { setRole(r); setView(r === "manager" ? "dashboard" : "kasir"); }} pin={store.pin || MANAGER_PIN} />
       </>
     );
   }
@@ -715,8 +760,9 @@ export default function App() {
             />
           )}
           {view === "order" && (
-            <Orders orders={orders} setOrders={setOrders} pById={pById}
+            <Orders orders={orders} setOrders={setOrders} pById={pById} products={products}
               onStatus={(id, status) => persist(() => OrdersApi.setStatus(id, status))}
+              onCreate={createOrder}
               onAccept={(o) => {
                 o.items.forEach((it) => recordMovement(it.pid, "out", it.qty, `Order ${o.id}`));
                 o.items.forEach((it) => { const p = pById(it.pid); if (p) recordSale(it.pid, it.qty, p.price * it.qty); });
@@ -783,6 +829,17 @@ export default function App() {
             <label className="fld"><span>Ucapan footer</span>
               <input value={store.footer} onChange={(e) => setStore((s) => ({ ...s, footer: e.target.value }))} /></label>
           </div>
+
+          {managerMode && (
+            <>
+              <div className="form-section">Keamanan</div>
+              <label className="fld"><span>PIN Manajer</span>
+                <input type="text" inputMode="numeric" maxLength={8} value={store.pin || ""} placeholder="cth. 1234"
+                  onChange={(e) => setStore((s) => ({ ...s, pin: e.target.value.replace(/\D/g, "") }))} />
+                <span className="hint">PIN untuk masuk mode Manajer (minimal 4 digit). Tersimpan saat Anda klik “Selesai”. Kalau dikosongkan, PIN kembali ke 1234.</span>
+              </label>
+            </>
+          )}
 
           <div className="form-section">Printer</div>
           <label className="fld"><span>Lebar kertas</span>
@@ -1470,11 +1527,18 @@ const ORDER_FLOW = ["baru", "diproses", "dikirim", "selesai"];
 const ORDER_LABEL = { baru: "Baru", diproses: "Diproses", dikirim: "Dikirim", selesai: "Selesai" };
 const CHANNEL_ICON = { WhatsApp: Globe, Instagram: Globe, Marketplace: Truck };
 
-function Orders({ orders, setOrders, pById, onAccept, onStatus, flash }) {
+function Orders({ orders, setOrders, pById, products, onAccept, onStatus, onCreate, flash }) {
   const [tab, setTab] = useState("baru");
+  const [creating, setCreating] = useState(false);
 
   const orderTotal = (o) => o.items.reduce((a, it) => a + (pById(it.pid)?.price || 0) * it.qty, 0);
   const counts = ORDER_FLOW.reduce((acc, s) => ({ ...acc, [s]: orders.filter((o) => o.status === s).length }), {});
+
+  const waText = (o) => {
+    const lines = o.items.map((it) => `• ${it.qty}× ${pById(it.pid)?.name || "Barang"}`).join("\n");
+    const status = { baru: "sudah kami terima ✅", diproses: "sedang kami siapkan 🛠️", dikirim: "sudah dikirim 🚚", selesai: "sudah selesai 🎉" }[o.status];
+    return `Halo ${o.customer || ""}, pesanan *${o.id}* Anda ${status}.\n\n${lines}\n\nTotal: ${rp(orderTotal(o))}\n\nTerima kasih sudah berbelanja di Conflux Coffee Club! ☕`;
+  };
 
   const advance = (o) => {
     const i = ORDER_FLOW.indexOf(o.status);
@@ -1489,6 +1553,11 @@ function Orders({ orders, setOrders, pById, onAccept, onStatus, flash }) {
 
   return (
     <div className="stack">
+      <div className="acc-toolbar">
+        <div className="muted" style={{ fontSize: 13 }}>Catat pesanan masuk (WhatsApp / IG / marketplace) lalu proses sampai selesai.</div>
+        <button className="btn" onClick={() => setCreating(true)}><Plus size={16} /> Order Baru</button>
+      </div>
+
       <div className="order-tabs">
         {ORDER_FLOW.map((s) => (
           <button key={s} className={`order-tab ${tab === s ? "on" : ""}`} onClick={() => setTab(s)}>
@@ -1527,14 +1596,94 @@ function Orders({ orders, setOrders, pById, onAccept, onStatus, flash }) {
               </div>
               <div className="order-card-foot">
                 <span className="order-total">Total {rp(orderTotal(o))}</span>
-                {cta && <button className="btn sm" onClick={() => advance(o)}>{cta} <ChevronRight size={14} /></button>}
-                {!cta && <span className="done-tag"><Check size={14} /> Selesai</span>}
+                <div className="order-actions">
+                  {o.phone && (
+                    <a className="btn sm wa" href={waLink(o.phone, waText(o))} target="_blank" rel="noreferrer" title="Kirim update via WhatsApp">
+                      <Phone size={14} /> WhatsApp
+                    </a>
+                  )}
+                  {cta && <button className="btn sm" onClick={() => advance(o)}>{cta} <ChevronRight size={14} /></button>}
+                  {!cta && <span className="done-tag"><Check size={14} /> Selesai</span>}
+                </div>
               </div>
             </div>
           );
         })}
       </div>
+
+      {creating && (
+        <OrderForm products={products} onClose={() => setCreating(false)} onSave={(data) => { onCreate(data); setCreating(false); }} />
+      )}
     </div>
+  );
+}
+
+function OrderForm({ products, onClose, onSave }) {
+  const [customer, setCustomer] = useState("");
+  const [phone, setPhone] = useState("");
+  const [channel, setChannel] = useState("WhatsApp");
+  const [lines, setLines] = useState([]);
+  const [pick, setPick] = useState(products[0]?.id || "");
+  const [qty, setQty] = useState(1);
+
+  const addLine = () => {
+    if (!pick || qty < 1) return;
+    setLines((ls) => {
+      const ex = ls.find((l) => l.pid === pick);
+      if (ex) return ls.map((l) => (l.pid === pick ? { ...l, qty: l.qty + Number(qty) } : l));
+      return [...ls, { pid: pick, qty: Number(qty) }];
+    });
+    setQty(1);
+  };
+  const removeLine = (pid) => setLines((ls) => ls.filter((l) => l.pid !== pid));
+  const total = lines.reduce((a, l) => a + (products.find((p) => p.id === l.pid)?.price || 0) * l.qty, 0);
+  const valid = customer.trim() && lines.length > 0;
+
+  return (
+    <Modal
+      open onClose={onClose} width={540} title="Order Baru"
+      footer={<>
+        <button className="btn ghost" onClick={onClose}>Batal</button>
+        <button className="btn" disabled={!valid} onClick={() => onSave({ customer: customer.trim(), phone: phone.trim(), channel, items: lines })}><Check size={15} /> Simpan order</button>
+      </>}
+    >
+      <div className="form">
+        <div className="grid2">
+          <label className="fld"><span>Nama pelanggan</span>
+            <input value={customer} onChange={(e) => setCustomer(e.target.value)} autoFocus placeholder="cth. Kedai Senja" /></label>
+          <label className="fld"><span>No. WhatsApp</span>
+            <input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="numeric" placeholder="cth. 0812xxxxxxx" /></label>
+        </div>
+        <label className="fld"><span>Sumber order</span>
+          <select className="sim-select" value={channel} onChange={(e) => setChannel(e.target.value)}>
+            <option>WhatsApp</option><option>Instagram</option><option>Marketplace</option><option>Telepon</option>
+          </select></label>
+
+        <div className="form-section">Barang dipesan</div>
+        <div className="order-pick">
+          <select className="sim-select" value={pick} onChange={(e) => setPick(e.target.value)}>
+            {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          <input type="number" min="1" className="qty-in" value={qty} onChange={(e) => setQty(Math.max(1, Number(e.target.value)))} />
+          <button className="btn sm" type="button" onClick={addLine}><Plus size={14} /> Tambah</button>
+        </div>
+        {lines.length > 0 ? (
+          <div className="order-line-list">
+            {lines.map((l) => {
+              const p = products.find((x) => x.id === l.pid);
+              return (
+                <div key={l.pid} className="order-line">
+                  <span>{l.qty}× {p?.name}</span>
+                  <span className="muted tab">{rp((p?.price || 0) * l.qty)}</span>
+                  <button className="icon-btn xs danger-h" type="button" onClick={() => removeLine(l.pid)}><X size={14} /></button>
+                </div>
+              );
+            })}
+            <div className="order-line grand"><span>Total</span><b>{rp(total)}</b></div>
+          </div>
+        ) : <div className="muted xs">Belum ada barang. Pilih barang lalu klik "Tambah".</div>}
+      </div>
+    </Modal>
   );
 }
 
@@ -2678,8 +2827,19 @@ function Style() {
         background:var(--surface-2);padding:4px 9px;border-radius:999px}
       .order-items{display:flex;flex-direction:column;gap:7px;padding:12px 0;border-top:1px solid var(--line-soft);border-bottom:1px solid var(--line-soft)}
       .order-item{display:flex;justify-content:space-between;font-size:13px}
-      .order-card-foot{display:flex;justify-content:space-between;align-items:center}
+      .order-card-foot{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
       .order-total{font-weight:600;font-size:13.5px}
+      .order-actions{display:flex;align-items:center;gap:7px}
+      .btn.wa{background:#25D366;color:#0a2a16;box-shadow:none;text-decoration:none}
+      .btn.wa:hover{background:#1eb456}
+      .order-pick{display:flex;gap:8px;align-items:center}
+      .order-pick .sim-select{flex:1}
+      .order-pick .qty-in{width:74px;border:1px solid var(--line);background:var(--surface-2);border-radius:var(--r-xs);padding:9px 10px;color:var(--ink);font:inherit}
+      .order-line-list{display:flex;flex-direction:column;gap:2px;margin-top:4px}
+      .order-line{display:flex;align-items:center;gap:10px;padding:7px 0;font-size:13.5px;border-bottom:1px solid var(--line-soft)}
+      .order-line span:first-child{flex:1}
+      .order-line.grand{border-bottom:none;border-top:2px solid var(--line);margin-top:2px;padding-top:9px;font-weight:700}
+      .order-line.grand b{font-family:'Space Grotesk'}
       .done-tag{display:inline-flex;align-items:center;gap:4px;color:var(--ok);font-weight:600;font-size:13px}
 
       .auto-tag{font-size:9.5px;font-weight:700;letter-spacing:.04em;color:var(--teal);background:var(--teal-soft);
@@ -2733,19 +2893,25 @@ function Style() {
       .debt-actions{display:flex;align-items:center;gap:8px}
       .receipt-preview{display:flex;justify-content:center;background:#cfcabb;padding:14px;border-radius:10px}
       .receipt{font-family:'Courier New',ui-monospace,monospace;color:#111;background:#fff;width:256px;
-        padding:12px 14px;font-size:12px;line-height:1.5;box-shadow:0 4px 14px rgba(0,0,0,.25)}
+        padding:14px 14px;font-size:12px;line-height:1.5;box-shadow:0 4px 14px rgba(0,0,0,.25)}
       .receipt.w80{width:320px}
       .receipt .r-center{text-align:center}
-      .receipt .r-store{font-weight:700;font-size:15px;letter-spacing:.02em;margin-bottom:2px}
+      .receipt .r-logo{display:block;width:58px;height:58px;object-fit:cover;border-radius:10px;margin:0 auto 8px;
+        filter:grayscale(1) contrast(1.15)}
+      .receipt .r-store{font-weight:700;font-size:15px;letter-spacing:.04em;margin-bottom:2px;text-transform:uppercase}
+      .receipt .r-tag{font-size:10px;font-style:italic;color:#444;margin-bottom:1px}
       .receipt .r-small{font-size:11px}
-      .receipt .r-title{font-weight:700;letter-spacing:.08em;margin-bottom:4px}
+      .receipt .r-title{font-weight:700;letter-spacing:.1em;margin-bottom:5px}
       .receipt .r-line{border-top:1px dashed #555;margin:7px 0}
+      .receipt .r-dash{border-top:1px dashed #777;margin:8px 0}
+      .receipt .r-meta{margin:1px 0}
       .receipt .r-row{display:flex;justify-content:space-between;gap:10px}
-      .receipt .r-item{margin-bottom:3px}
-      .receipt .r-item-name{font-size:12px}
-      .receipt .r-total{font-weight:700;font-size:13px;margin:2px 0}
+      .receipt .r-item{margin-bottom:4px}
+      .receipt .r-item-name{font-size:12px;font-weight:600}
+      .receipt .r-total{font-weight:700;font-size:14px;margin:2px 0;border-top:2px solid #111;border-bottom:2px solid #111;padding:3px 0}
       .receipt .r-stamp{border:1.5px solid #111;text-align:center;font-weight:700;padding:3px;margin:7px 0;letter-spacing:.05em}
-      .receipt .r-foot{font-size:11px;margin-top:3px}
+      .receipt .r-foot{font-size:11px;margin-top:6px}
+      .receipt .r-brand{font-size:11px;font-weight:700;letter-spacing:.14em;margin-top:4px}
 
       #receipt-print{position:fixed;left:-99999px;top:0;background:#fff}
       @media print{
@@ -2753,22 +2919,47 @@ function Style() {
         .app > *{display:none !important}
         #receipt-print{display:block !important;position:static !important;left:0 !important;width:100% !important}
         #receipt-print .receipt{width:100% !important;box-shadow:none !important;padding:0 3mm !important;font-size:11px;color:#000}
+        #receipt-print .r-logo{width:52px !important;height:52px !important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
       }
 
       /* ===== Login peran ===== */
-      .gate{min-height:100vh;display:grid;place-items:center;background:radial-gradient(1200px 600px at 50% -10%, #1a2a23, #0E1512);padding:24px;font-family:'Inter',sans-serif}
-      .gate-card{width:100%;max-width:440px;background:var(--surface);border:1px solid var(--line);border-radius:20px;
-        padding:30px 26px;text-align:center;box-shadow:0 24px 70px rgba(0,0,0,.45)}
-      .gate-logo{width:84px;height:84px;border-radius:20px;object-fit:cover;border:2px solid rgba(236,231,218,.2);box-shadow:0 6px 20px rgba(0,0,0,.4)}
-      .gate-title{font-family:'Anton',sans-serif;font-size:30px;letter-spacing:.08em;color:var(--ink);margin-top:14px;line-height:1}
-      .gate-sub{font-size:12.5px;color:var(--ink-faint);letter-spacing:.05em;text-transform:uppercase;margin-top:5px;margin-bottom:24px}
+      .gate{position:relative;overflow:hidden;min-height:100vh;display:grid;place-items:center;padding:24px;font-family:'Inter',sans-serif;
+        background:
+          radial-gradient(1100px 680px at 12% -8%, #1d2e26 0%, transparent 58%),
+          radial-gradient(900px 560px at 102% 108%, #182620 0%, transparent 55%),
+          linear-gradient(155deg,#0E1512 0%,#121A16 48%,#0B110E 100%)}
+      .gate-bg{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+      .gate-orb{position:absolute;border-radius:50%;filter:blur(64px)}
+      .orb-a{width:400px;height:400px;background:radial-gradient(circle,rgba(226,81,77,.34),transparent 70%);top:-90px;left:-70px;animation:orb-a 15s ease-in-out infinite}
+      .orb-b{width:340px;height:340px;background:radial-gradient(circle,rgba(111,174,146,.30),transparent 70%);bottom:-80px;right:-60px;animation:orb-b 18s ease-in-out infinite}
+      .orb-c{width:280px;height:280px;background:radial-gradient(circle,rgba(224,165,60,.16),transparent 70%);top:42%;left:54%;animation:orb-c 21s ease-in-out infinite}
+      @keyframes orb-a{0%,100%{transform:translate(0,0)}50%{transform:translate(46px,34px)}}
+      @keyframes orb-b{0%,100%{transform:translate(0,0)}50%{transform:translate(-34px,-28px)}}
+      @keyframes orb-c{0%,100%{transform:translate(0,0)}50%{transform:translate(-24px,22px)}}
+      .gate-bean{position:absolute;color:var(--ink);opacity:.05}
+      .bean-1{width:210px;top:11%;right:9%;transform:rotate(14deg)}
+      .bean-2{width:130px;bottom:13%;left:7%;transform:rotate(-22deg)}
+      .bean-3{width:90px;top:60%;right:22%;transform:rotate(40deg);opacity:.04}
+      .gate-grain{position:absolute;inset:0;opacity:.035;background-image:radial-gradient(rgba(236,231,218,.6) 1px,transparent 1px);background-size:4px 4px}
+      .gate-card{position:relative;z-index:1;width:100%;max-width:430px;border-radius:24px;padding:34px 28px;text-align:center;
+        background:linear-gradient(180deg,rgba(31,42,36,.92),rgba(20,28,24,.92));
+        border:1px solid rgba(236,231,218,.10);box-shadow:var(--shadow-lg),inset 0 1px 0 rgba(236,231,218,.06);
+        backdrop-filter:blur(18px) saturate(1.15);-webkit-backdrop-filter:blur(18px) saturate(1.15);animation:gate-in .5s var(--ease)}
+      @keyframes gate-in{from{opacity:0;transform:translateY(14px) scale(.985)}to{opacity:1;transform:translateY(0) scale(1)}}
+      .gate-logo-ring{width:92px;height:92px;margin:0 auto;border-radius:24px;display:grid;place-items:center;
+        background:linear-gradient(145deg,rgba(226,81,77,.25),rgba(111,174,146,.18));box-shadow:0 0 30px rgba(226,81,77,.22)}
+      .gate-logo{width:78px;height:78px;border-radius:18px;object-fit:cover;box-shadow:0 6px 20px rgba(0,0,0,.5)}
+      .gate-title{font-family:'Anton',sans-serif;font-size:32px;letter-spacing:.1em;margin-top:16px;line-height:1;
+        background:linear-gradient(180deg,#FBF8F0,#CFC7B6);-webkit-background-clip:text;background-clip:text;color:transparent}
+      .gate-sub{font-size:12px;color:var(--ink-faint);letter-spacing:.18em;text-transform:uppercase;margin-top:6px;margin-bottom:26px}
       .gate-roles{display:grid;grid-template-columns:1fr 1fr;gap:12px}
       .gate-role{position:relative;display:flex;flex-direction:column;align-items:center;gap:5px;text-align:center;
-        background:var(--surface-2);border:1px solid var(--line);border-radius:14px;padding:20px 14px;cursor:pointer;transition:.15s;font:inherit;color:var(--ink)}
-      .gate-role:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:0 8px 22px rgba(0,0,0,.3)}
+        background:rgba(36,48,42,.6);border:1px solid var(--line);border-radius:var(--r-sm);padding:22px 14px;cursor:pointer;transition:.18s var(--ease);font:inherit;color:var(--ink)}
+      .gate-role:hover{border-color:var(--accent);transform:translateY(-3px);box-shadow:0 10px 26px rgba(0,0,0,.34)}
+      .gate-role:active{transform:translateY(-1px) scale(.99)}
       .gate-role b{font-size:15px;font-weight:600}
       .gate-role span{font-size:11.5px;color:var(--ink-soft);line-height:1.35}
-      .gate-ic{width:46px;height:46px;border-radius:13px;display:grid;place-items:center;margin-bottom:4px}
+      .gate-ic{width:48px;height:48px;border-radius:14px;display:grid;place-items:center;margin-bottom:4px}
       .gate-ic.cashier{background:var(--teal-soft);color:var(--teal)}
       .gate-ic.manager{background:var(--accent-soft);color:var(--accent)}
       .gate-lock{position:absolute;top:9px;right:9px;display:inline-flex;align-items:center;gap:3px;font-size:9.5px;font-weight:700;
@@ -2778,7 +2969,7 @@ function Style() {
       .gate-pin .pin-input{width:100%}
       .gate-pin-actions{display:flex;gap:10px;width:100%}
       .gate-pin-actions .btn{flex:1}
-      .gate-foot{margin-top:22px;font-size:11px;color:var(--ink-faint);font-style:italic}
+      .gate-foot{margin-top:24px;font-size:11px;color:var(--ink-faint);font-style:italic;letter-spacing:.02em}
 
       /* role footer */
       .role-badge{display:flex;align-items:center;gap:7px;font-weight:600;font-size:13px;padding:8px 11px;border-radius:9px;margin-bottom:8px}

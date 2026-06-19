@@ -71,7 +71,14 @@ export const Orders = {
   async list() {
     const { data, error } = await supabase.from("orders").select("*").order("created_at", { ascending: false });
     if (error) throw error;
-    return data.map((r) => ({ id: r.id, customer: r.customer, channel: r.channel, status: r.status, items: r.items, total: Number(r.total), at: r.created_at }));
+    return data.map((r) => ({ id: r.id, customer: r.customer, phone: r.phone, channel: r.channel, status: r.status, items: r.items || [], total: Number(r.total), at: r.created_at }));
+  },
+  async create(o) {
+    const { error } = await supabase.from("orders").insert({
+      id: o.id, customer: o.customer, phone: o.phone || null, channel: o.channel,
+      status: o.status || "baru", items: o.items || [], total: o.total || 0,
+    });
+    if (error) throw error;
   },
   async setStatus(id, status) {
     const { error } = await supabase.from("orders").update({ status }).eq("id", id);
