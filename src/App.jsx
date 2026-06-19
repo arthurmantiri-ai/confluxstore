@@ -412,19 +412,23 @@ function RoleGate({ onEnter, pin: managerPin }) {
   return (
     <div className="gate">
       <div className="gate-bg" aria-hidden="true">
+        <div className="gate-spot" />
         <span className="gate-orb orb-a" />
         <span className="gate-orb orb-b" />
         <span className="gate-orb orb-c" />
-        <svg className="gate-bean bean-1" viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2">
-          <ellipse cx="32" cy="32" rx="26" ry="17" transform="rotate(-30 32 32)" /><path d="M16 41C26 31 38 33 48 23" />
+        <span className="gate-orb orb-d" />
+        <svg className="gate-steam" viewBox="0 0 60 96" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round">
+          <path d="M18 90c0-13 7-16 7-29S18 33 18 20" />
+          <path d="M30 90c0-13 7-16 7-29S30 33 30 20" />
+          <path d="M42 90c0-13 7-16 7-29S42 33 42 20" />
         </svg>
-        <svg className="gate-bean bean-2" viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2">
-          <ellipse cx="32" cy="32" rx="26" ry="17" transform="rotate(-30 32 32)" /><path d="M16 41C26 31 38 33 48 23" />
-        </svg>
-        <svg className="gate-bean bean-3" viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2">
-          <ellipse cx="32" cy="32" rx="26" ry="17" transform="rotate(-30 32 32)" /><path d="M16 41C26 31 38 33 48 23" />
-        </svg>
+        {["bean-1", "bean-2", "bean-3", "bean-4", "bean-5", "bean-6"].map((c) => (
+          <svg key={c} className={`gate-bean ${c}`} viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2">
+            <ellipse cx="32" cy="32" rx="26" ry="17" transform="rotate(-30 32 32)" /><path d="M16 41C26 31 38 33 48 23" />
+          </svg>
+        ))}
         <div className="gate-grain" />
+        <div className="gate-vignette" />
       </div>
 
       <div className="gate-card">
@@ -2718,7 +2722,7 @@ function Style() {
       .pos{display:grid;grid-template-columns:1fr 360px;gap:20px;height:calc(100vh - 64px - 52px)}
       .pos-products{display:flex;flex-direction:column;gap:14px;min-height:0}
       .pos-products .search{flex:0 0 auto}
-      .pos-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;overflow-y:auto;padding-right:4px;align-content:start;flex:1 1 auto;min-height:0}
+      .pos-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px;overflow-y:auto;padding-right:4px;align-content:start;flex:1 1 auto;min-height:0}
       .pos-empty{grid-column:1/-1;align-self:start}
       .cat-tabs{display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;flex:0 0 auto;scrollbar-width:none}
       .cat-tabs::-webkit-scrollbar{display:none}
@@ -2728,17 +2732,19 @@ function Style() {
       .cat-tab:hover{color:var(--ink);border-color:rgba(236,231,218,.18)}
       .cat-tab.on{background:var(--ink);color:var(--bg);border-color:var(--ink);box-shadow:var(--shadow-sm);font-weight:600}
       .cat-tab svg{opacity:.85}
-      .pos-card{position:relative;overflow:hidden;text-align:left;background:var(--surface);border:1px solid var(--line);
+      .pos-card{position:relative;text-align:left;background:var(--surface);border:1px solid var(--line);
         border-radius:var(--r-sm);padding:14px;display:flex;flex-direction:column;gap:7px;transition:transform .18s var(--ease),box-shadow .18s var(--ease),border-color .18s var(--ease)}
       .pos-card:hover{transform:translateY(-2px);box-shadow:var(--shadow);border-color:rgba(236,231,218,.16)}
       .pos-card.out{opacity:.5}
-      .pos-card-wm{position:absolute;right:-10px;top:-8px;color:var(--ink);opacity:.05;pointer-events:none}
-      .pos-card-top{display:flex;justify-content:space-between;align-items:center;position:relative;z-index:1}
-      .pos-cat{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:var(--ink-faint);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
-      .pos-cat svg{color:var(--teal)}
-      .pos-stock{font-size:11px;font-weight:600;color:var(--ok);background:var(--ok-bg);padding:2px 7px;border-radius:var(--r-xs)}
+      .pos-card-wm{position:absolute;right:8px;top:34px;color:var(--ink);opacity:.045;pointer-events:none;z-index:0}
+      .pos-card-top{display:flex;justify-content:space-between;align-items:center;gap:6px;position:relative;z-index:1}
+      .pos-cat{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:var(--ink-faint);font-weight:600;text-transform:uppercase;letter-spacing:.04em;min-width:0}
+      .pos-cat svg{color:var(--teal);flex-shrink:0}
+      .pos-cat{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .pos-stock{font-size:11px;font-weight:600;color:var(--ok);background:var(--ok-bg);padding:2px 7px;border-radius:var(--r-xs);flex-shrink:0;white-space:nowrap}
       .pos-stock.zero{color:var(--crit);background:var(--crit-bg)}
-      .pos-name{font-weight:600;font-size:13.5px;line-height:1.25;flex:1;position:relative;z-index:1}
+      .pos-name{font-weight:600;font-size:13.5px;line-height:1.3;flex:1;position:relative;z-index:1;
+        display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:35px}
       .pos-price{font-family:'Space Grotesk';font-weight:600;color:var(--accent);font-size:15px;position:relative;z-index:1}
       .pos-price .per{font-family:'Inter';font-weight:500;font-size:11px;color:var(--ink-faint)}
       .pos-price .strike{font-family:'Inter';font-weight:500;font-size:11px;color:var(--ink-faint);text-decoration:line-through;margin-right:5px}
@@ -2746,9 +2752,9 @@ function Style() {
         background:var(--crit);padding:1px 5px;border-radius:5px;vertical-align:middle}
       .promo-mini{font-size:10.5px;font-weight:600;color:var(--crit);margin-top:2px}
       .per{font-family:'Inter';font-weight:500;font-size:11px;color:var(--ink-faint)}
-      .pos-add{display:flex;gap:6px;margin-top:2px}
-      .add-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
-        border:1px solid var(--line);background:var(--surface-2);border-radius:var(--r-xs);padding:8px 4px;font:inherit;
+      .pos-add{display:flex;gap:6px;margin-top:4px;position:relative;z-index:1}
+      .add-btn{flex:1;min-height:40px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+        border:1px solid var(--line);background:var(--surface-2);border-radius:var(--r-xs);padding:7px 4px;font:inherit;
         font-size:12px;font-weight:600;color:var(--accent);cursor:pointer;transition:transform .1s var(--ease),background .15s,border-color .15s}
       .add-btn:hover:not(:disabled){background:var(--accent-soft);border-color:var(--accent)}
       .add-btn:active:not(:disabled){transform:scale(.94);background:var(--accent);color:#fff;border-color:var(--accent)}
@@ -2925,22 +2931,38 @@ function Style() {
       /* ===== Login peran ===== */
       .gate{position:relative;overflow:hidden;min-height:100vh;display:grid;place-items:center;padding:24px;font-family:'Inter',sans-serif;
         background:
-          radial-gradient(1100px 680px at 12% -8%, #1d2e26 0%, transparent 58%),
-          radial-gradient(900px 560px at 102% 108%, #182620 0%, transparent 55%),
-          linear-gradient(155deg,#0E1512 0%,#121A16 48%,#0B110E 100%)}
+          radial-gradient(820px 560px at 16% 6%, rgba(226,81,77,.12), transparent 55%),
+          radial-gradient(860px 600px at 86% 10%, rgba(111,174,146,.12), transparent 55%),
+          radial-gradient(900px 640px at 78% 104%, rgba(224,165,60,.08), transparent 55%),
+          radial-gradient(760px 520px at 8% 96%, rgba(111,174,146,.07), transparent 55%),
+          linear-gradient(158deg,#0E1512 0%,#101813 46%,#090E0B 100%)}
       .gate-bg{position:absolute;inset:0;overflow:hidden;pointer-events:none}
-      .gate-orb{position:absolute;border-radius:50%;filter:blur(64px)}
-      .orb-a{width:400px;height:400px;background:radial-gradient(circle,rgba(226,81,77,.34),transparent 70%);top:-90px;left:-70px;animation:orb-a 15s ease-in-out infinite}
-      .orb-b{width:340px;height:340px;background:radial-gradient(circle,rgba(111,174,146,.30),transparent 70%);bottom:-80px;right:-60px;animation:orb-b 18s ease-in-out infinite}
-      .orb-c{width:280px;height:280px;background:radial-gradient(circle,rgba(224,165,60,.16),transparent 70%);top:42%;left:54%;animation:orb-c 21s ease-in-out infinite}
-      @keyframes orb-a{0%,100%{transform:translate(0,0)}50%{transform:translate(46px,34px)}}
-      @keyframes orb-b{0%,100%{transform:translate(0,0)}50%{transform:translate(-34px,-28px)}}
-      @keyframes orb-c{0%,100%{transform:translate(0,0)}50%{transform:translate(-24px,22px)}}
-      .gate-bean{position:absolute;color:var(--ink);opacity:.05}
-      .bean-1{width:210px;top:11%;right:9%;transform:rotate(14deg)}
-      .bean-2{width:130px;bottom:13%;left:7%;transform:rotate(-22deg)}
-      .bean-3{width:90px;top:60%;right:22%;transform:rotate(40deg);opacity:.04}
-      .gate-grain{position:absolute;inset:0;opacity:.035;background-image:radial-gradient(rgba(236,231,218,.6) 1px,transparent 1px);background-size:4px 4px}
+      .gate-spot{position:absolute;top:50%;left:50%;width:720px;height:720px;transform:translate(-50%,-50%);
+        background:radial-gradient(circle,rgba(111,174,146,.12),rgba(226,81,77,.06) 42%,transparent 68%);animation:spot-pulse 9s ease-in-out infinite}
+      @keyframes spot-pulse{0%,100%{opacity:.65;transform:translate(-50%,-50%) scale(1)}50%{opacity:1;transform:translate(-50%,-50%) scale(1.07)}}
+      .gate-orb{position:absolute;border-radius:50%;filter:blur(70px)}
+      .orb-a{width:420px;height:420px;background:radial-gradient(circle,rgba(226,81,77,.36),transparent 70%);top:-100px;left:-80px;animation:orb-a 15s ease-in-out infinite}
+      .orb-b{width:360px;height:360px;background:radial-gradient(circle,rgba(111,174,146,.32),transparent 70%);bottom:-90px;right:-70px;animation:orb-b 18s ease-in-out infinite}
+      .orb-c{width:300px;height:300px;background:radial-gradient(circle,rgba(224,165,60,.18),transparent 70%);top:40%;left:56%;animation:orb-c 21s ease-in-out infinite}
+      .orb-d{width:340px;height:340px;background:radial-gradient(circle,rgba(111,174,146,.20),transparent 70%);top:8%;right:24%;animation:orb-c 24s ease-in-out infinite reverse}
+      @keyframes orb-a{0%,100%{transform:translate(0,0)}50%{transform:translate(50px,38px)}}
+      @keyframes orb-b{0%,100%{transform:translate(0,0)}50%{transform:translate(-38px,-30px)}}
+      @keyframes orb-c{0%,100%{transform:translate(0,0)}50%{transform:translate(-28px,24px)}}
+      .gate-steam{position:absolute;top:6%;left:50%;transform:translateX(-50%);width:80px;height:120px;color:var(--teal);opacity:.10}
+      .gate-steam path{animation:steam-sway 4.5s ease-in-out infinite;transform-origin:center;transform-box:fill-box}
+      .gate-steam path:nth-child(2){animation-delay:.7s}
+      .gate-steam path:nth-child(3){animation-delay:1.4s}
+      @keyframes steam-sway{0%,100%{opacity:.25;transform:translateY(6px)}50%{opacity:.9;transform:translateY(-6px)}}
+      .gate-bean{position:absolute;color:var(--ink)}
+      .bean-1{--rot:14deg;width:200px;top:12%;right:9%;opacity:.055;transform:rotate(var(--rot));animation:bean-float 22s ease-in-out infinite}
+      .bean-2{--rot:-22deg;width:120px;bottom:14%;left:7%;opacity:.05;transform:rotate(var(--rot));animation:bean-float 27s ease-in-out infinite reverse}
+      .bean-3{--rot:40deg;width:84px;top:62%;right:21%;opacity:.04;transform:rotate(var(--rot));animation:bean-float 19s ease-in-out infinite}
+      .bean-4{--rot:-8deg;width:150px;top:16%;left:13%;opacity:.04;transform:rotate(var(--rot));animation:bean-float 30s ease-in-out infinite reverse}
+      .bean-5{width:64px;bottom:22%;right:38%;transform:rotate(25deg);opacity:.045}
+      .bean-6{--rot:-34deg;width:104px;bottom:8%;right:12%;opacity:.035;transform:rotate(var(--rot));animation:bean-float 24s ease-in-out infinite}
+      @keyframes bean-float{0%,100%{transform:translateY(0) rotate(var(--rot,0deg))}50%{transform:translateY(-16px) rotate(var(--rot,0deg))}}
+      .gate-grain{position:absolute;inset:0;opacity:.04;background-image:radial-gradient(rgba(236,231,218,.6) 1px,transparent 1px);background-size:4px 4px}
+      .gate-vignette{position:absolute;inset:0;background:radial-gradient(125% 125% at 50% 48%,transparent 52%,rgba(5,9,7,.62) 100%)}
       .gate-card{position:relative;z-index:1;width:100%;max-width:430px;border-radius:24px;padding:34px 28px;text-align:center;
         background:linear-gradient(180deg,rgba(31,42,36,.92),rgba(20,28,24,.92));
         border:1px solid rgba(236,231,218,.10);box-shadow:var(--shadow-lg),inset 0 1px 0 rgba(236,231,218,.06);
