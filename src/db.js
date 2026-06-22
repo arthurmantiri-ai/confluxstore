@@ -149,3 +149,26 @@ export const Settings = {
   async get() { const { data, error } = await supabase.from("settings").select("data").eq("id", 1).single(); if (error) throw error; return data.data; },
   async save(obj) { const { error } = await supabase.from("settings").upsert({ id: 1, data: obj }); if (error) throw error; },
 };
+
+/* ============================ AUTH / PROFILES ============================ */
+export const Auth = {
+  async signIn(email, password) {
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+  },
+  async signOut() { await supabase.auth.signOut(); },
+  async getSession() { const { data } = await supabase.auth.getSession(); return data.session; },
+  onChange(cb) { return supabase.auth.onAuthStateChange((_e, s) => cb(s)); },
+};
+
+export const Profiles = {
+  // Profil (peran + nama) milik user yang sedang login
+  async me() {
+    const { data: u } = await supabase.auth.getUser();
+    const uid = u?.user?.id;
+    if (!uid) return null;
+    const { data, error } = await supabase.from("profiles").select("role,name").eq("id", uid).single();
+    if (error) throw error;
+    return data; // { role, name }
+  },
+};

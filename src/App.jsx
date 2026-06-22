@@ -1,6 +1,6 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { hasSupabase } from "./supabaseClient";
-import { Products, Movements, Orders as OrdersApi, Debts as DebtsApi, Capital, Expenses, Sales, Settings as SettingsApi } from "./db";
+import { Products, Movements, Orders as OrdersApi, Debts as DebtsApi, Capital, Expenses, Sales, Settings as SettingsApi, Auth, Profiles } from "./db";
 import {
   LayoutDashboard, Package, ShoppingCart, Globe, RefreshCcw,
   Plus, Minus, Search, X, Check, TrendingUp, ArrowUpRight, ArrowDownRight,
@@ -559,6 +559,104 @@ function RoleGate({ onEnter, pin: managerPin }) {
   );
 }
 
+// Latar estetik dipakai bersama oleh layar login
+function GateBg() {
+  return (
+    <div className="gate-bg" aria-hidden="true">
+      <div className="gate-spot" />
+      <span className="gate-orb orb-a" />
+      <span className="gate-orb orb-b" />
+      <span className="gate-orb orb-c" />
+      <span className="gate-orb orb-d" />
+      <svg className="gate-steam" viewBox="0 0 60 96" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round">
+        <path d="M18 90c0-13 7-16 7-29S18 33 18 20" />
+        <path d="M30 90c0-13 7-16 7-29S30 33 30 20" />
+        <path d="M42 90c0-13 7-16 7-29S42 33 42 20" />
+      </svg>
+      {["bean-1", "bean-2", "bean-3", "bean-4", "bean-5", "bean-6"].map((c) => (
+        <svg key={c} className={`gate-bean ${c}`} viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2">
+          <ellipse cx="32" cy="32" rx="26" ry="17" transform="rotate(-30 32 32)" /><path d="M16 41C26 31 38 33 48 23" />
+        </svg>
+      ))}
+      <div className="gate-grain" />
+      <div className="gate-vignette" />
+    </div>
+  );
+}
+
+function AuthSplash() {
+  return (
+    <div className="gate">
+      <GateBg />
+      <div className="gate-card">
+        <div className="gate-logo-ring"><img className="gate-logo" src={LOGO} alt="Conflux" /></div>
+        <div className="gate-title">CONFLUX</div>
+        <div className="gate-sub">Menyiapkan…</div>
+      </div>
+    </div>
+  );
+}
+
+function Login({ flash }) {
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const submit = async () => {
+    if (!email.trim() || !pw) return;
+    setBusy(true); setErr("");
+    try { await Auth.signIn(email.trim(), pw); }
+    catch (e) { setErr("Email atau kata sandi salah."); setBusy(false); }
+  };
+  return (
+    <div className="gate">
+      <GateBg />
+      <div className="gate-card">
+        <div className="gate-logo-ring"><img className="gate-logo" src={LOGO} alt="Conflux" /></div>
+        <div className="gate-title">CONFLUX</div>
+        <div className="gate-sub">Coffee Club · Masuk</div>
+        <div className="gate-pin">
+          <label className="fld" style={{ width: "100%" }}><span>Email</span>
+            <input className="pin-input" type="email" autoFocus value={email} placeholder="email@conflux"
+              onChange={(e) => { setEmail(e.target.value); setErr(""); }} onKeyDown={(e) => { if (e.key === "Enter") submit(); }} /></label>
+          <label className="fld" style={{ width: "100%" }}><span>Kata sandi</span>
+            <input className="pin-input" type="password" value={pw} placeholder="••••••••"
+              onChange={(e) => { setPw(e.target.value); setErr(""); }} onKeyDown={(e) => { if (e.key === "Enter") submit(); }} /></label>
+          {err && <div className="pin-err">{err}</div>}
+          <button className="btn full" disabled={busy || !email.trim() || !pw} onClick={submit}>
+            {busy ? "Memeriksa…" : <><Unlock size={15} /> Masuk</>}
+          </button>
+        </div>
+        <div className="gate-foot">Akses hanya untuk staf Conflux</div>
+      </div>
+    </div>
+  );
+}
+
+function CashierNameGate({ onEnter, onBack }) {
+  const [name, setName] = useState("");
+  return (
+    <div className="gate">
+      <GateBg />
+      <div className="gate-card">
+        <div className="gate-logo-ring"><img className="gate-logo" src={LOGO} alt="Conflux" /></div>
+        <div className="gate-title">CONFLUX</div>
+        <div className="gate-sub">Coffee Club · Kasir</div>
+        <div className="gate-pin">
+          <div className="gate-pin-label"><User size={15} /> Nama kasir hari ini</div>
+          <input className="pin-input" autoFocus value={name} placeholder="cth. Rani"
+            onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) onEnter(name.trim()); }} />
+          <div className="gate-pin-actions">
+            <button className="btn ghost" onClick={onBack}>Keluar</button>
+            <button className="btn" disabled={!name.trim()} onClick={() => onEnter(name.trim())}><ArrowRight size={15} /> Mulai</button>
+          </div>
+          <div className="pin-hint">Nama ini menempel pada setiap transaksi & struk Anda.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* =============================== App =============================== */
 
 export default function App() {
@@ -588,30 +686,62 @@ export default function App() {
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 2200); };
   const pById = (id) => products.find((p) => p.id === id);
 
-  // ===== Sinkronisasi Supabase =====
+  // ===== Sinkronisasi Supabase + Autentikasi =====
   const persist = (fn) => { if (hasSupabase) fn().catch((e) => console.error("[sync]", e)); };
 
+  const [session, setSession] = useState(null);
+  const [authReady, setAuthReady] = useState(!hasSupabase);
+  const [profileRole, setProfileRole] = useState(null);
+  const loadedRef = useRef(false);
+  const authUidRef = useRef(null);
+
+  const loadAll = async () => {
+    try {
+      const [p, mv, od, dz, cap, exp, sl] = await Promise.all([
+        Products.list(), Movements.list(), OrdersApi.list(), DebtsApi.list(),
+        Capital.list(), Expenses.list(), Sales.list(),
+      ]);
+      setProducts(p); setMovements(mv); setOrders(od); setDebts(dz);
+      setCapital(cap); setExpenses(exp); setSalesLog(sl);
+      try { const st = await SettingsApi.get(); if (st) setStore((s) => ({ ...s, ...st })); } catch (_) {}
+      flash("Tersambung ke database");
+    } catch (e) {
+      console.error("[load]", e);
+      flash("Gagal memuat data server — periksa koneksi/akses");
+    }
+  };
+
+  // Pantau sesi login
   useEffect(() => {
     if (!hasSupabase) return;
     let alive = true;
-    (async () => {
+    const apply = async (s) => {
+      if (!alive) return;
+      setSession(s);
+      const uid = s?.user?.id || null;
+      if (!s) { authUidRef.current = null; setRole(null); setProfileRole(null); setCashierName(""); loadedRef.current = false; setAuthReady(true); return; }
+      if (authUidRef.current === uid) { setAuthReady(true); return; } // refresh token sesi yang sama — jangan setup ulang
+      authUidRef.current = uid;
       try {
-        const [p, mv, od, dz, cap, exp, sl] = await Promise.all([
-          Products.list(), Movements.list(), OrdersApi.list(), DebtsApi.list(),
-          Capital.list(), Expenses.list(), Sales.list(),
-        ]);
+        const prof = await Profiles.me();
         if (!alive) return;
-        setProducts(p); setMovements(mv); setOrders(od); setDebts(dz);
-        setCapital(cap); setExpenses(exp); setSalesLog(sl);
-        try { const st = await SettingsApi.get(); if (alive && st) setStore((s) => ({ ...s, ...st })); } catch (_) {}
-        flash("Tersambung ke database");
-      } catch (e) {
-        console.error("[load]", e);
-        flash("Gagal memuat data server — memakai data contoh");
-      }
-    })();
-    return () => { alive = false; };
+        const r = prof?.role === "manager" ? "manager" : "cashier";
+        setProfileRole(r);
+        if (r === "manager") { setRole("manager"); setCashierName(prof?.name || "Manajer"); setView("dashboard"); setShiftStart(Date.now()); }
+      } catch (e) { console.error("[profile]", e); setProfileRole("cashier"); }
+      setAuthReady(true);
+    };
+    Auth.getSession().then(apply);
+    const { data: sub } = Auth.onChange(apply);
+    return () => { alive = false; sub?.subscription?.unsubscribe?.(); };
   }, []);
+
+  // Muat data hanya setelah login (RLS butuh sesi terautentikasi)
+  useEffect(() => {
+    if (!hasSupabase || !session || loadedRef.current) return;
+    loadedRef.current = true;
+    loadAll();
+  }, [session]);
 
   const recordMovement = (productId, type, qty, note) => {
     const prev = products.find((p) => p.id === productId);
@@ -622,7 +752,7 @@ export default function App() {
     persist(() => Products.setStock(productId, newStock));
   };
 
-  const logout = () => { setRole(null); setSidebarOpen(false); setShiftReport(null); };
+  const logout = () => { if (hasSupabase) Auth.signOut(); setRole(null); setSidebarOpen(false); setShiftReport(null); setCashierName(""); loadedRef.current = false; };
 
   // Ringkasan shift kasir (anti-kecurangan): transaksi kasir ini sejak login
   const buildShiftReport = () => {
@@ -816,12 +946,30 @@ export default function App() {
   const deltaPct = yRev ? Math.round(((todayRev - yRev) / yRev) * 100) : 0;
 
   if (!role) {
-    return (
-      <>
-        <Style />
-        <RoleGate onEnter={(r, name) => { setRole(r); setView(r === "manager" ? "dashboard" : "kasir"); setCashierName(r === "manager" ? "Manajer" : (name || "Kasir")); setShiftStart(Date.now()); }} pin={store.pin || MANAGER_PIN} />
-      </>
-    );
+    // Mode offline/demo (tanpa Supabase): tetap pakai gerbang PIN lama
+    if (!hasSupabase) {
+      return (
+        <>
+          <Style />
+          <RoleGate onEnter={(r, name) => { setRole(r); setView(r === "manager" ? "dashboard" : "kasir"); setCashierName(r === "manager" ? "Manajer" : (name || "Kasir")); setShiftStart(Date.now()); }} pin={store.pin || MANAGER_PIN} />
+        </>
+      );
+    }
+    // Online: autentikasi sungguhan
+    if (!authReady) return (<><Style /><AuthSplash /></>);
+    if (!session) return (<><Style /><Login flash={flash} /></>);
+    if (profileRole === "cashier") {
+      return (
+        <>
+          <Style />
+          <CashierNameGate
+            onEnter={(name) => { setRole("cashier"); setCashierName(name || "Kasir"); setShiftStart(Date.now()); setView("kasir"); }}
+            onBack={() => Auth.signOut()}
+          />
+        </>
+      );
+    }
+    return (<><Style /><AuthSplash /></>);
   }
 
   return (
