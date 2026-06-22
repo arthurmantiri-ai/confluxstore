@@ -47,6 +47,11 @@ export const Products = {
     const { error } = await supabase.from("products").update({ stock }).eq("id", id);
     if (error) throw error;
   },
+  // Ubah stok lewat fungsi server (aman: kasir tak perlu izin update produk penuh)
+  async adjustStock(id, delta) {
+    const { error } = await supabase.rpc("adjust_stock", { p_id: id, p_delta: delta });
+    if (error) throw error;
+  },
   async remove(id) {
     const { error } = await supabase.from("products").delete().eq("id", id);
     if (error) throw error;

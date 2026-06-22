@@ -10,7 +10,7 @@ import {
   Lock, Unlock, ShieldCheck, Calculator, ArrowRight,
   Phone, Building2, User, CheckCircle2, Printer, Settings, LogOut,
   LineChart, BarChart3, Coins, Hammer, Download, Calendar,
-  Bean, Droplets, CupSoda, Coffee, LayoutGrid, History, Wallet2, Bluetooth
+  Bean, Droplets, CupSoda, Coffee, LayoutGrid, History, Bluetooth
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -26,6 +26,22 @@ const LOGO = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/7QCEUGhvdG9zaG9
 const rp = (n) => "Rp" + new Intl.NumberFormat("id-ID").format(Math.round(n || 0));
 const num = (n) => new Intl.NumberFormat("id-ID").format(Math.round(n || 0));
 const uid = () => Math.random().toString(36).slice(2, 9);
+
+// Tampilkan waktu ramah: ISO/epoch -> waktu lokal; label seperti "Baru saja" dibiarkan
+const fmtAt = (at) => {
+  if (at == null || at === "") return "—";
+  if (typeof at === "string" && !/\d{4}-\d{2}-\d{2}T/.test(at)) return at;
+  const d = new Date(at);
+  if (isNaN(d.getTime())) return String(at);
+  return d.toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+};
+
+// Nomor nota unik berbasis tanggal+waktu (tidak bentrok antar perangkat/refresh)
+const invoiceNo = () => {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `INV-${String(d.getFullYear()).slice(2)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+};
 
 // Siklus order / periode review (hari) — dipakai untuk saran jumlah re-stok
 const REVIEW_DAYS = 7;
@@ -681,13 +697,12 @@ export default function App() {
   const [printReceipt, setPrintReceipt] = useState(null);
   const [receiptModal, setReceiptModal] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [invSeq, setInvSeq] = useState(1043);
 
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 2200); };
   const pById = (id) => products.find((p) => p.id === id);
 
   // ===== Sinkronisasi Supabase + Autentikasi =====
-  const persist = (fn) => { if (hasSupabase) fn().catch((e) => console.error("[sync]", e)); };
+  const persist = (fn) => { if (hasSupabase) fn().catch((e) => { console.error("[sync]", e); flash("Gagal menyimpan ke server — cek koneksi"); }); };
 
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(!hasSupabase);
@@ -696,19 +711,22 @@ export default function App() {
   const authUidRef = useRef(null);
 
   const loadAll = async () => {
-    try {
-      const [p, mv, od, dz, cap, exp, sl] = await Promise.all([
-        Products.list(), Movements.list(), OrdersApi.list(), DebtsApi.list(),
-        Capital.list(), Expenses.list(), Sales.list(),
-      ]);
-      setProducts(p); setMovements(mv); setOrders(od); setDebts(dz);
-      setCapital(cap); setExpenses(exp); setSalesLog(sl);
-      try { const st = await SettingsApi.get(); if (st) setStore((s) => ({ ...s, ...st })); } catch (_) {}
-      flash("Tersambung ke database");
-    } catch (e) {
-      console.error("[load]", e);
-      flash("Gagal memuat data server — periksa koneksi/akses");
-    }
+    const res = await Promise.allSettled([
+      Products.list(), Movements.list(), OrdersApi.list(), DebtsApi.list(),
+      Capital.list(), Expenses.list(), Sales.list(), SettingsApi.get(),
+    ]);
+    const [p, mv, od, dz, cap, exp, sl, st] = res;
+    if (p.status === "fulfilled") setProducts(p.value);
+    if (mv.status === "fulfilled") setMovements(mv.value);
+    if (od.status === "fulfilled") setOrders(od.value);
+    if (dz.status === "fulfilled") setDebts(dz.value);
+    if (cap.status === "fulfilled") setCapital(cap.value);
+    if (exp.status === "fulfilled") setExpenses(exp.value);
+    if (sl.status === "fulfilled") setSalesLog(sl.value);
+    if (st.status === "fulfilled" && st.value) setStore((s) => ({ ...s, ...st.value }));
+    const failed = res.filter((r) => r.status === "rejected");
+    if (failed.length) { console.error("[load]", failed.map((f) => f.reason)); flash("Sebagian data gagal dimuat — cek koneksi/akses"); }
+    else flash("Tersambung ke database");
   };
 
   // Pantau sesi login
@@ -749,7 +767,22 @@ export default function App() {
     setProducts((ps) => ps.map((p) => (p.id === productId ? { ...p, stock: newStock } : p)));
     setMovements((m) => [{ id: uid(), productId, type, qty, note, at: "Baru saja" }, ...m]);
     persist(() => Movements.create({ productId, type, qty, note }));
-    persist(() => Products.setStock(productId, newStock));
+    persist(() => Products.adjustStock(productId, type === "in" ? qty : -qty));
+  };
+
+  // Pemotongan/penambahan stok BANYAK baris sekaligus (aman jika produk sama muncul >1 kali)
+  const applyStockDeltas = (deltas) => {
+    const newStock = {};
+    deltas.forEach((d) => {
+      const base = newStock[d.productId] != null ? newStock[d.productId] : (products.find((p) => p.id === d.productId)?.stock ?? 0);
+      newStock[d.productId] = Math.max(0, base + (d.type === "in" ? d.qty : -d.qty));
+    });
+    setProducts((ps) => ps.map((p) => (newStock[p.id] != null ? { ...p, stock: newStock[p.id] } : p)));
+    setMovements((m) => [...deltas.map((d) => ({ id: uid(), productId: d.productId, type: d.type, qty: d.qty, note: d.note, at: "Baru saja" })), ...m]);
+    deltas.forEach((d) => {
+      persist(() => Movements.create({ productId: d.productId, type: d.type, qty: d.qty, note: d.note }));
+      persist(() => Products.adjustStock(d.productId, d.type === "in" ? d.qty : -d.qty));
+    });
   };
 
   const logout = () => { if (hasSupabase) Auth.signOut(); setRole(null); setSidebarOpen(false); setShiftReport(null); setCashierName(""); loadedRef.current = false; };
@@ -891,8 +924,7 @@ export default function App() {
     total: 0, methodLabel: "Tes", paid: 0, change: 0,
   });
   const buildSaleReceipt = (total, method, meta) => {
-    const no = "INV-" + String(invSeq).padStart(5, "0");
-    setInvSeq((s) => s + 1);
+    const no = invoiceNo();
     return {
       kind: method === "hutang" ? "hutang" : "jual",
       no, date: nowStamp(), cashier: cashierName || "Kasir",
@@ -1053,7 +1085,7 @@ export default function App() {
             <Kasir products={products}
               onCheckout={(lines, total, method, meta) => {
                 const txnId = uid();
-                lines.forEach((l) => recordMovement(l.pid, "out", l.qty, `Penjualan kasir (${PAY_LABEL[method]})`));
+                applyStockDeltas(lines.map((l) => ({ productId: l.pid, type: "out", qty: l.qty, note: `Penjualan kasir (${PAY_LABEL[method]})` })));
                 (meta.items || []).forEach((it) => recordSale(it.pid, it.qty, it.lineTotal, { txnId, cashier: cashierName || "Kasir", method }));
                 if (method === "hutang") { addDebt(meta, total); flash(`Hutang ${rp(total)} dicatat — ${meta?.debtor || "Pelanggan"}`); }
                 else flash(`Pembayaran ${rp(total)} via ${PAY_LABEL[method]} berhasil`);
@@ -1068,7 +1100,7 @@ export default function App() {
               onCreate={createOrder}
               onAccept={(o) => {
                 const txnId = uid();
-                o.items.forEach((it) => recordMovement(it.pid, "out", it.qty, `Order ${o.id}`));
+                applyStockDeltas(o.items.map((it) => ({ productId: it.pid, type: "out", qty: it.qty, note: `Order ${o.id}` })));
                 o.items.forEach((it) => { const p = pById(it.pid); if (p) recordSale(it.pid, it.qty, p.price * it.qty, { txnId, cashier: "Order Online", method: "order" }); });
                 flash(`${o.id} diterima & stok dipotong`);
               }}
@@ -1134,7 +1166,7 @@ export default function App() {
               <input value={store.footer} onChange={(e) => setStore((s) => ({ ...s, footer: e.target.value }))} /></label>
           </div>
 
-          {managerMode && (
+          {managerMode && !hasSupabase && (
             <>
               <div className="form-section">Keamanan</div>
               <label className="fld"><span>PIN Manajer</span>
@@ -1327,7 +1359,7 @@ function Dashboard({ products, chart, todayRev, deltaPct, lowStock, inventoryVal
                   <td><span className={`mv ${m.type}`}>{m.type === "in" ? <Plus size={12} /> : <Minus size={12} />}{m.type === "in" ? "Masuk" : "Keluar"}</span></td>
                   <td className="r tab">{num(m.qty)}</td>
                   <td className="muted">{m.note}</td>
-                  <td className="r muted">{m.at}</td>
+                  <td className="r muted">{fmtAt(m.at)}</td>
                 </tr>
               );
             })}
@@ -2043,7 +2075,7 @@ function Orders({ orders, setOrders, pById, products, onAccept, onStatus, onCrea
               <div className="order-card-head">
                 <div>
                   <div className="order-id">{o.id}</div>
-                  <div className="muted xs">{o.customer} · {o.at}</div>
+                  <div className="muted xs">{o.customer} · {fmtAt(o.at)}</div>
                 </div>
                 <span className="channel"><ChIcon size={13} /> {o.channel}</span>
               </div>
