@@ -10,7 +10,8 @@ import {
   Lock, Unlock, ShieldCheck, Calculator, ArrowRight,
   Phone, Building2, User, CheckCircle2, Printer, Settings, LogOut,
   LineChart, BarChart3, Coins, Hammer, Download, Calendar,
-  Bean, Droplets, CupSoda, Coffee, LayoutGrid, History, Bluetooth
+  Coffee, CupSoda, Utensils, UtensilsCrossed, Cookie, LayoutGrid, History, Bluetooth,
+  Thermometer, FlameKindling, IceCream2, Beef, Wheat, AlertCircle
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -81,39 +82,48 @@ const hasPromo = (p) => p.promo && p.promo.active && Number(p.promo.value) > 0;
 const hasCarton = (p) => Number(p.cartonSize) > 0 && Number(p.priceCarton) > 0;
 
 const SEED_PRODUCTS = [
-  // ===== BENIH — biji kopi (satuan: kg, tanpa karton) =====
-  { id: uid(), name: "Robusta Temanggung (Fine)", sku: "BNH-ROB", category: "Benih", unit: "kg", cost: 185250, price: 195000, stock: 14, dailyUsage: 2, leadTime: 5, safetyStock: 6 },
-  { id: uid(), name: "Sulawesi Blend 70% (Toraja-Robusta)", sku: "BNH-SL70", category: "Benih", unit: "kg", cost: 247000, price: 260000, stock: 8, dailyUsage: 2, leadTime: 5, safetyStock: 5 },
-  { id: uid(), name: "Sulawesi Blend 50% (Toraja-Robusta)", sku: "BNH-SL50", category: "Benih", unit: "kg", cost: 228000, price: 240000, stock: 22, dailyUsage: 1, leadTime: 5, safetyStock: 4 },
-  { id: uid(), name: "Java Blend 70% (Ijen-Robusta)", sku: "BNH-JV70", category: "Benih", unit: "kg", cost: 247000, price: 260000, stock: 4, dailyUsage: 2, leadTime: 5, safetyStock: 5 },
-  { id: uid(), name: "Java Blend 50% (Ijen-Robusta)", sku: "BNH-JV50", category: "Benih", unit: "kg", cost: 228000, price: 240000, stock: 16, dailyUsage: 1, leadTime: 5, safetyStock: 4 },
+  // ===== MINUMAN PANAS — stock dihitung per porsi/cup =====
+  { id: uid(), name: "Kopi Hitam (Americano)", sku: "MNP-AMR", category: "Minuman Panas", unit: "cup", cost: 7000, price: 18000, stock: 40, dailyUsage: 15, leadTime: 1, safetyStock: 10,
+    variants: [{ key: "S", label: "Small (200ml)", price: 15000, cost: 5500 }, { key: "M", label: "Medium (300ml)", price: 18000, cost: 7000 }, { key: "L", label: "Large (500ml)", price: 22000, cost: 8500 }] },
+  { id: uid(), name: "Latte", sku: "MNP-LAT", category: "Minuman Panas", unit: "cup", cost: 10000, price: 27000, stock: 35, dailyUsage: 12, leadTime: 1, safetyStock: 8,
+    variants: [{ key: "S", label: "Small (200ml)", price: 22000, cost: 8000 }, { key: "M", label: "Medium (300ml)", price: 27000, cost: 10000 }, { key: "L", label: "Large (500ml)", price: 32000, cost: 12000 }] },
+  { id: uid(), name: "Cappuccino", sku: "MNP-CAP", category: "Minuman Panas", unit: "cup", cost: 10000, price: 27000, stock: 30, dailyUsage: 10, leadTime: 1, safetyStock: 8,
+    variants: [{ key: "S", label: "Small (200ml)", price: 22000, cost: 8000 }, { key: "M", label: "Medium (300ml)", price: 27000, cost: 10000 }, { key: "L", label: "Large (500ml)", price: 32000, cost: 12000 }] },
+  { id: uid(), name: "Teh Manis Panas", sku: "MNP-TEH", category: "Minuman Panas", unit: "cup", cost: 3000, price: 10000, stock: 50, dailyUsage: 8, leadTime: 1, safetyStock: 5,
+    variants: [{ key: "S", label: "Small", price: 8000, cost: 2500 }, { key: "M", label: "Medium", price: 10000, cost: 3000 }, { key: "L", label: "Large", price: 12000, cost: 3500 }] },
+  { id: uid(), name: "Coklat Panas", sku: "MNP-CHC", category: "Minuman Panas", unit: "cup", cost: 9000, price: 23000, stock: 25, dailyUsage: 7, leadTime: 1, safetyStock: 5,
+    variants: [{ key: "S", label: "Small", price: 18000, cost: 7000 }, { key: "M", label: "Medium", price: 23000, cost: 9000 }, { key: "L", label: "Large", price: 28000, cost: 11000 }] },
 
-  // ===== DRIPP — syrup (satuan: botol, 1 karton = 6 botol) =====
-  { id: uid(), name: "Dripp Syrup Caramel 760ml", sku: "DRP-CRM", category: "Dripp", unit: "botol", cost: 99900, price: 118000, cartonSize: 6, priceCarton: 690000, promo: { active: true, type: "percent", value: 10 }, stock: 54, dailyUsage: 5, leadTime: 7, safetyStock: 24 },
-  { id: uid(), name: "Dripp Syrup Butterscotch 760ml", sku: "DRP-BTS", category: "Dripp", unit: "botol", cost: 99900, price: 118000, cartonSize: 6, priceCarton: 690000, stock: 30, dailyUsage: 5, leadTime: 7, safetyStock: 30 },
-  { id: uid(), name: "Dripp Syrup Cinnamon 760ml", sku: "DRP-CNM", category: "Dripp", unit: "botol", cost: 99900, price: 118000, cartonSize: 6, priceCarton: 690000, stock: 18, dailyUsage: 3, leadTime: 7, safetyStock: 18 },
-  { id: uid(), name: "Dripp Syrup Hazelnut 760ml", sku: "DRP-HZL", category: "Dripp", unit: "botol", cost: 99900, price: 118000, cartonSize: 6, priceCarton: 690000, stock: 84, dailyUsage: 4, leadTime: 7, safetyStock: 24 },
-  { id: uid(), name: "Dripp Syrup Passion Fruit 760ml", sku: "DRP-PSF", category: "Dripp", unit: "botol", cost: 99900, price: 118000, cartonSize: 6, priceCarton: 690000, stock: 42, dailyUsage: 3, leadTime: 7, safetyStock: 24 },
-  { id: uid(), name: "Dripp Syrup Vanilla 760ml", sku: "DRP-VNL", category: "Dripp", unit: "botol", cost: 99900, price: 118000, cartonSize: 6, priceCarton: 690000, stock: 96, dailyUsage: 4, leadTime: 7, safetyStock: 24 },
-  { id: uid(), name: "Dripp Syrup Sea Salt 760ml", sku: "DRP-SST", category: "Dripp", unit: "botol", cost: 99900, price: 118000, cartonSize: 6, priceCarton: 690000, stock: 24, dailyUsage: 3, leadTime: 7, safetyStock: 24 },
+  // ===== MINUMAN DINGIN — stock dihitung per porsi/cup =====
+  { id: uid(), name: "Es Kopi Susu", sku: "MND-EKS", category: "Minuman Dingin", unit: "cup", cost: 10000, price: 25000, stock: 45, dailyUsage: 20, leadTime: 1, safetyStock: 12,
+    variants: [{ key: "S", label: "Small (350ml)", price: 20000, cost: 8000 }, { key: "M", label: "Medium (500ml)", price: 25000, cost: 10000 }, { key: "L", label: "Large (700ml)", price: 30000, cost: 12000 }] },
+  { id: uid(), name: "Matcha Latte Dingin", sku: "MND-MTL", category: "Minuman Dingin", unit: "cup", cost: 11000, price: 27000, stock: 30, dailyUsage: 14, leadTime: 1, safetyStock: 8,
+    variants: [{ key: "S", label: "Small", price: 22000, cost: 9000 }, { key: "M", label: "Medium", price: 27000, cost: 11000 }, { key: "L", label: "Large", price: 32000, cost: 13000 }] },
+  { id: uid(), name: "Es Teh Manis", sku: "MND-ETH", category: "Minuman Dingin", unit: "cup", cost: 3500, price: 10000, stock: 60, dailyUsage: 18, leadTime: 1, safetyStock: 10,
+    variants: [{ key: "S", label: "Small", price: 8000, cost: 3000 }, { key: "M", label: "Medium", price: 10000, cost: 3500 }, { key: "L", label: "Large", price: 12000, cost: 4000 }] },
+  { id: uid(), name: "Jus Jeruk Segar", sku: "MND-JJR", category: "Minuman Dingin", unit: "cup", cost: 9000, price: 22000, stock: 20, dailyUsage: 8, leadTime: 1, safetyStock: 5,
+    variants: [{ key: "S", label: "Small (250ml)", price: 18000, cost: 7000 }, { key: "M", label: "Medium (350ml)", price: 22000, cost: 9000 }, { key: "L", label: "Large (500ml)", price: 26000, cost: 11000 }] },
+  { id: uid(), name: "Boba Milk Tea", sku: "MND-BMT", category: "Minuman Dingin", unit: "cup", cost: 12000, price: 28000, stock: 25, dailyUsage: 10, leadTime: 1, safetyStock: 6,
+    variants: [{ key: "S", label: "Small", price: 22000, cost: 9000 }, { key: "M", label: "Medium", price: 28000, cost: 12000 }, { key: "L", label: "Large", price: 35000, cost: 15000 }] },
 
-  // ===== MASTERISTA — powder & syrup (satuan: pcs; harga jual default, silakan disesuaikan) =====
-  { id: uid(), name: "Masterista Gula Aren Pouch 1000g", sku: "LL4020", category: "Masterista", unit: "pcs", cost: 60125, price: 75000, stock: 30, dailyUsage: 3, leadTime: 3, safetyStock: 10 },
-  { id: uid(), name: "Masterista Ice Shaken Lemon Tea 1kg", sku: "LL3481", category: "Masterista", unit: "pcs", cost: 69375, price: 85000, stock: 8, dailyUsage: 2, leadTime: 3, safetyStock: 8 },
-  { id: uid(), name: "Masterista Syrup Classic Caramel 850ml", sku: "LL3861", category: "Masterista", unit: "pcs", cost: 101750, price: 125000, stock: 20, dailyUsage: 2, leadTime: 3, safetyStock: 8 },
-  { id: uid(), name: "Masterista Syrup French Vanilla 850ml", sku: "LL3860", category: "Masterista", unit: "pcs", cost: 101750, price: 125000, stock: 12, dailyUsage: 2, leadTime: 3, safetyStock: 8 },
-  { id: uid(), name: "Masterista Syrup Premium Hazelnut 850ml", sku: "LL3863", category: "Masterista", unit: "pcs", cost: 101750, price: 125000, stock: 18, dailyUsage: 2, leadTime: 3, safetyStock: 8 },
-  { id: uid(), name: "Masterista Powder Classic Chocolate Base 800g", sku: "LL3064", category: "Masterista", unit: "pcs", cost: 155400, price: 190000, stock: 24, dailyUsage: 3, leadTime: 3, safetyStock: 12 },
-  { id: uid(), name: "Masterista Powder Butterscotch Expecta 800g", sku: "LL3068", category: "Masterista", unit: "pcs", cost: 146150, price: 180000, stock: 14, dailyUsage: 3, leadTime: 3, safetyStock: 12 },
-  { id: uid(), name: "Masterista Powder Dark Chocolate 800g", sku: "LL2895", category: "Masterista", unit: "pcs", cost: 155400, price: 190000, stock: 9, dailyUsage: 2, leadTime: 3, safetyStock: 10 },
-  { id: uid(), name: "Masterista Powder Matcha Vanilla 800g", sku: "LL2892", category: "Masterista", unit: "pcs", cost: 161875, price: 195000, stock: 22, dailyUsage: 2, leadTime: 3, safetyStock: 10 },
-  { id: uid(), name: "Masterista Powder Original Matcha 800g", sku: "LL3066", category: "Masterista", unit: "pcs", cost: 161875, price: 195000, stock: 16, dailyUsage: 2, leadTime: 3, safetyStock: 10 },
-  { id: uid(), name: "Masterista Powder Taro Expecta 800g", sku: "LL2894", category: "Masterista", unit: "pcs", cost: 146150, price: 180000, stock: 11, dailyUsage: 2, leadTime: 3, safetyStock: 10 },
-  { id: uid(), name: "Masterista Powder Red Velvet 800g", sku: "LL2891", category: "Masterista", unit: "pcs", cost: 146150, price: 180000, stock: 7, dailyUsage: 2, leadTime: 3, safetyStock: 10 },
-  { id: uid(), name: "Masterista Syrup Butterscotch 850ml", sku: "LL6072", category: "Masterista", unit: "pcs", cost: 101750, price: 125000, stock: 19, dailyUsage: 2, leadTime: 3, safetyStock: 8 },
+  // ===== MAKANAN — stock dihitung per porsi =====
+  { id: uid(), name: "Nasi Goreng Spesial", sku: "MKN-NGS", category: "Makanan", unit: "porsi", cost: 10000, price: 25000, stock: 30, dailyUsage: 12, leadTime: 1, safetyStock: 5 },
+  { id: uid(), name: "Mie Goreng", sku: "MKN-MGR", category: "Makanan", unit: "porsi", cost: 8000, price: 22000, stock: 25, dailyUsage: 10, leadTime: 1, safetyStock: 5 },
+  { id: uid(), name: "Sandwich Club", sku: "MKN-SWC", category: "Makanan", unit: "pcs", cost: 12000, price: 30000, stock: 15, dailyUsage: 5, leadTime: 1, safetyStock: 3 },
+  { id: uid(), name: "Pasta Bolognese", sku: "MKN-PST", category: "Makanan", unit: "porsi", cost: 14000, price: 35000, stock: 20, dailyUsage: 8, leadTime: 1, safetyStock: 4 },
+  { id: uid(), name: "Nasi Uduk", sku: "MKN-NUD", category: "Makanan", unit: "porsi", cost: 7500, price: 18000, stock: 25, dailyUsage: 10, leadTime: 1, safetyStock: 5 },
+  { id: uid(), name: "Roti Bakar Keju", sku: "MKN-RTB", category: "Makanan", unit: "pcs", cost: 6000, price: 15000, stock: 20, dailyUsage: 8, leadTime: 1, safetyStock: 4 },
+
+  // ===== CEMILAN — stock dihitung per pcs/porsi =====
+  { id: uid(), name: "Kentang Goreng", sku: "CML-KTG", category: "Cemilan", unit: "porsi", cost: 7000, price: 18000, stock: 25, dailyUsage: 10, leadTime: 1, safetyStock: 5 },
+  { id: uid(), name: "Donat Coklat", sku: "CML-DNT", category: "Cemilan", unit: "pcs", cost: 4500, price: 12000, stock: 20, dailyUsage: 8, leadTime: 1, safetyStock: 4 },
+  { id: uid(), name: "Pisang Goreng", sku: "CML-PSG", category: "Cemilan", unit: "porsi", cost: 5500, price: 15000, stock: 20, dailyUsage: 9, leadTime: 1, safetyStock: 4 },
+  { id: uid(), name: "Croissant", sku: "CML-CRS", category: "Cemilan", unit: "pcs", cost: 8000, price: 20000, stock: 15, dailyUsage: 6, leadTime: 1, safetyStock: 3 },
 ].map((p, i) => ({
   code: "BRG-" + String(i + 1).padStart(3, "0"),
   cartonSize: 0, priceCarton: 0, promo: { active: false, type: "percent", value: 0 },
+  variants: [],
+  expiryDate: "", batchNo: "",
   ...p,
 }));
 
@@ -139,17 +149,17 @@ const genSku = (cat, ps) => {
 };
 
 const SEED_MOVEMENTS = [
-  { id: uid(), productId: SEED_PRODUCTS[12].id, type: "in", qty: 24, note: "Pembelian Masterista", at: "Hari ini, 08:12" },
-  { id: uid(), productId: SEED_PRODUCTS[5].id, type: "out", qty: 3, note: "Penjualan kasir", at: "Hari ini, 09:40" },
-  { id: uid(), productId: SEED_PRODUCTS[0].id, type: "out", qty: 5, note: "Penjualan kasir", at: "Hari ini, 10:05" },
-  { id: uid(), productId: SEED_PRODUCTS[17].id, type: "in", qty: 24, note: "Pembelian Masterista", at: "Kemarin, 16:30" },
+  { id: uid(), productId: SEED_PRODUCTS[10].id, type: "in", qty: 30, note: "Persiapan stok pagi", at: "Hari ini, 07:00" },
+  { id: uid(), productId: SEED_PRODUCTS[5].id, type: "out", qty: 4, note: "Penjualan kasir", at: "Hari ini, 09:40" },
+  { id: uid(), productId: SEED_PRODUCTS[0].id, type: "out", qty: 6, note: "Penjualan kasir", at: "Hari ini, 10:05" },
+  { id: uid(), productId: SEED_PRODUCTS[16].id, type: "waste", qty: 2, note: "Kentang kedaluwarsa", at: "Kemarin, 16:30" },
 ];
 
 const SEED_ORDERS = [
-  { id: "ORD-2041", customer: "Kopi Senja", channel: "WhatsApp", status: "baru", at: "10:24", items: [{ pid: SEED_PRODUCTS[14].id, qty: 6 }, { pid: SEED_PRODUCTS[5].id, qty: 2 }] },
-  { id: "ORD-2040", customer: "Filosofi Kopi", channel: "Instagram", status: "baru", at: "09:58", items: [{ pid: SEED_PRODUCTS[1].id, qty: 3 }, { pid: SEED_PRODUCTS[18].id, qty: 4 }] },
-  { id: "ORD-2039", customer: "Kafe Tomohon", channel: "WhatsApp", status: "diproses", at: "09:10", items: [{ pid: SEED_PRODUCTS[12].id, qty: 10 }] },
-  { id: "ORD-2038", customer: "Janji Jiwa Manado", channel: "Marketplace", status: "dikirim", at: "Kemarin", items: [{ pid: SEED_PRODUCTS[20].id, qty: 5 }, { pid: SEED_PRODUCTS[8].id, qty: 2 }] },
+  { id: "ORD-2041", customer: "Andi Pratama", channel: "WhatsApp", status: "baru", at: "10:24", items: [{ pid: SEED_PRODUCTS[10].id, qty: 2 }, { pid: SEED_PRODUCTS[5].id, qty: 3 }] },
+  { id: "ORD-2040", customer: "Rina Wijaya", channel: "Instagram", status: "baru", at: "09:58", items: [{ pid: SEED_PRODUCTS[0].id, qty: 2 }, { pid: SEED_PRODUCTS[16].id, qty: 2 }] },
+  { id: "ORD-2039", customer: "Budi Santoso", channel: "WhatsApp", status: "diproses", at: "09:10", items: [{ pid: SEED_PRODUCTS[13].id, qty: 1 }, { pid: SEED_PRODUCTS[6].id, qty: 2 }] },
+  { id: "ORD-2038", customer: "Siti Rahma", channel: "Phone", status: "dikirim", at: "Kemarin", items: [{ pid: SEED_PRODUCTS[1].id, qty: 2 }, { pid: SEED_PRODUCTS[17].id, qty: 2 }] },
 ];
 
 const SEED_SALES7 = [
@@ -160,14 +170,14 @@ const SEED_SALES7 = [
 
 const SEED_DEBTS = [
   {
-    id: "HTG-001", debtor: "Andi Pratama", business: "Kopi Senja", phone: "0812-3456-7890",
-    items: [{ name: "Dripp Syrup Caramel 760ml", qtyLabel: "1 karton", lineTotal: 690000 }, { name: "Masterista Powder Original Matcha 800g", qtyLabel: "4 pcs", lineTotal: 780000 }],
-    total: 1470000, date: "13 Jun 2026", status: "belum", paidAt: null,
+    id: "HTG-001", debtor: "Andi Pratama", business: "Kantor Notaris", phone: "0812-3456-7890",
+    items: [{ name: "Es Kopi Susu (M) × 3", qtyLabel: "3 cup", lineTotal: 75000 }, { name: "Nasi Goreng Spesial × 2", qtyLabel: "2 porsi", lineTotal: 50000 }],
+    total: 125000, date: "13 Jun 2026", status: "belum", paidAt: null,
   },
   {
-    id: "HTG-002", debtor: "Rina Wijaya", business: "Filosofi Kopi", phone: "0856-1122-3344",
-    items: [{ name: "Sulawesi Blend 70% (Toraja-Robusta)", qtyLabel: "3 kg", lineTotal: 780000 }],
-    total: 780000, date: "12 Jun 2026", status: "lunas", paidAt: "15 Jun 2026",
+    id: "HTG-002", debtor: "Rina Wijaya", business: "Butik Fashion", phone: "0856-1122-3344",
+    items: [{ name: "Latte (M) × 2", qtyLabel: "2 cup", lineTotal: 54000 }, { name: "Croissant × 2", qtyLabel: "2 pcs", lineTotal: 40000 }],
+    total: 94000, date: "12 Jun 2026", status: "lunas", paidAt: "15 Jun 2026",
   },
 ];
 const nextDebtId = (ds) => {
@@ -196,13 +206,13 @@ const waLink = (phone, text) => {
 
 // ===== Akuntansi =====
 const SEED_CAPITAL = [
-  { id: uid(), name: "Renovasi & interior kedai", amount: 45000000, date: "Modal awal" },
-  { id: uid(), name: "Mesin sangrai (roaster) & grinder", amount: 60000000, date: "Modal awal" },
-  { id: uid(), name: "Mesin espresso & peralatan bar", amount: 35000000, date: "Modal awal" },
-  { id: uid(), name: "Furniture & dekorasi", amount: 18000000, date: "Modal awal" },
-  { id: uid(), name: "Branding, logo & signage", amount: 8000000, date: "Modal awal" },
-  { id: uid(), name: "Sewa & deposit awal", amount: 24000000, date: "Modal awal" },
-  { id: uid(), name: "Perizinan & legalitas", amount: 5000000, date: "Modal awal" },
+  { id: uid(), name: "Renovasi & interior tempat", amount: 35000000, date: "Modal awal" },
+  { id: uid(), name: "Peralatan dapur & memasak", amount: 25000000, date: "Modal awal" },
+  { id: uid(), name: "Mesin kopi & peralatan minuman", amount: 20000000, date: "Modal awal" },
+  { id: uid(), name: "Furniture, meja & kursi", amount: 15000000, date: "Modal awal" },
+  { id: uid(), name: "Branding, logo & signage", amount: 7000000, date: "Modal awal" },
+  { id: uid(), name: "Sewa & deposit awal", amount: 20000000, date: "Modal awal" },
+  { id: uid(), name: "Perizinan & legalitas usaha", amount: 5000000, date: "Modal awal" },
 ];
 const EXPENSE_CATS = ["Sewa", "Gaji", "Utilitas", "Marketing", "Operasional", "Lain-lain"];
 const SEED_EXPENSES = [
@@ -243,10 +253,11 @@ const PAY_LABEL = Object.fromEntries(PAY_METHODS.map((m) => [m.key, m.label]));
 
 const catIcon = (category = "") => {
   const c = String(category).toLowerCase();
-  if (/benih|biji|kopi|bean|roast|arabika|robusta/.test(c)) return Bean;
-  if (/dripp|syrup|sirup|drip|saus|sauce|liquid/.test(c)) return Droplets;
-  if (/master|powder|bubuk|matcha|choco|cokelat|coklat/.test(c)) return CupSoda;
-  return Coffee;
+  if (/panas|hot|kopi.*panas|coffee.*hot/.test(c)) return Coffee;
+  if (/dingin|cold|es |ice|boba|jus/.test(c)) return CupSoda;
+  if (/makanan|food|nasi|mie|pasta|sandwich|roti/.test(c)) return Utensils;
+  if (/cemilan|snack|kue|donat|pisang|kentang|croissant/.test(c)) return Cookie;
+  return UtensilsCrossed;
 };
 
 // PIN manajer untuk membuka kunci edit & hapus barang.
@@ -255,11 +266,11 @@ const MANAGER_PIN = "1234";
 
 // Profil toko untuk header nota (bisa diubah di Pengaturan Nota)
 const DEFAULT_STORE = {
-  name: "Conflux Coffee Club",
-  addr1: "Tomohon · Manado, Sulawesi Utara",
-  addr2: "Brewing Connection, One Cup at a Time",
-  phone: "@conflux.coffee",
-  footer: "Terima kasih sudah berbelanja!",
+  name: "Nama Toko Anda",
+  addr1: "Alamat Toko · Kota",
+  addr2: "Tagline toko Anda di sini",
+  phone: "@handle_sosmed",
+  footer: "Terima kasih sudah mampir!",
   pin: "1234", // PIN mode manajer (bisa diganti di Pengaturan)
   paper: 58, // 58 atau 80 mm
   method: "browser", // "browser" | "bluetooth" | "serial"
@@ -769,11 +780,12 @@ export default function App() {
 
   const recordMovement = (productId, type, qty, note) => {
     const prev = products.find((p) => p.id === productId);
-    const newStock = prev ? Math.max(0, prev.stock + (type === "in" ? qty : -qty)) : 0;
+    const delta = type === "in" ? qty : -qty; // waste & out both deduct
+    const newStock = prev ? Math.max(0, prev.stock + delta) : 0;
     setProducts((ps) => ps.map((p) => (p.id === productId ? { ...p, stock: newStock } : p)));
     setMovements((m) => [{ id: uid(), productId, type, qty, note, at: "Baru saja" }, ...m]);
     persist(() => Movements.create({ productId, type, qty, note }));
-    persist(() => Products.adjustStock(productId, type === "in" ? qty : -qty));
+    persist(() => Products.adjustStock(productId, delta));
   };
 
   // Pemotongan/penambahan stok BANYAK baris sekaligus (aman jika produk sama muncul >1 kali)
@@ -781,7 +793,8 @@ export default function App() {
     const newStock = {};
     deltas.forEach((d) => {
       const base = newStock[d.productId] != null ? newStock[d.productId] : (products.find((p) => p.id === d.productId)?.stock ?? 0);
-      newStock[d.productId] = Math.max(0, base + (d.type === "in" ? d.qty : -d.qty));
+      const delta = d.type === "in" ? d.qty : -d.qty; // waste & out both deduct
+      newStock[d.productId] = Math.max(0, base + delta);
     });
     setProducts((ps) => ps.map((p) => (newStock[p.id] != null ? { ...p, stock: newStock[p.id] } : p)));
     setMovements((m) => [...deltas.map((d) => ({ id: uid(), productId: d.productId, type: d.type, qty: d.qty, note: d.note, at: "Baru saja" })), ...m]);
@@ -1221,8 +1234,8 @@ export default function App() {
 
           <button className="btn ghost full" onClick={() => triggerPrint({
             kind: "jual", no: "INV-CONTOH", date: nowStamp(), cashier: "Manajer",
-            items: [{ name: "Dripp Syrup Caramel 760ml", qtyLabel: "1 karton", lineTotal: 690000 }, { name: "Masterista Powder Original Matcha 800g", qtyLabel: "2 pcs", lineTotal: 390000 }],
-            total: 1080000, methodLabel: "Tunai", paid: 1100000, change: 20000,
+            items: [{ name: "Es Kopi Susu (M)", qtyLabel: "2 cup", lineTotal: 50000 }, { name: "Nasi Goreng Spesial", qtyLabel: "1 porsi", lineTotal: 25000 }],
+            total: 75000, methodLabel: "Tunai", paid: 80000, change: 5000,
           })}><Printer size={15} /> Cetak nota contoh</button>
         </div>
       </Modal>
@@ -1362,7 +1375,7 @@ function Dashboard({ products, chart, todayRev, deltaPct, lowStock, inventoryVal
               return (
                 <tr key={m.id}>
                   <td className="strong">{p?.name || "—"}</td>
-                  <td><span className={`mv ${m.type}`}>{m.type === "in" ? <Plus size={12} /> : <Minus size={12} />}{m.type === "in" ? "Masuk" : "Keluar"}</span></td>
+                  <td><span className={`mv ${m.type}`}>{m.type === "in" ? <Plus size={12} /> : m.type === "waste" ? <AlertCircle size={12} /> : <Minus size={12} />}{m.type === "in" ? "Masuk" : m.type === "waste" ? "Terbuang" : "Keluar"}</span></td>
                   <td className="r tab">{num(m.qty)}</td>
                   <td className="muted">{m.note}</td>
                   <td className="r muted">{fmtAt(m.at)}</td>
@@ -1486,7 +1499,7 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
     return okQ && okF;
   });
 
-  const openMove = (p, type) => { setMoveFor(p); setMoveType(type); setQty(1); setNote(type === "in" ? "Pembelian supplier" : "Penyesuaian"); };
+  const openMove = (p, type) => { setMoveFor(p); setMoveType(type); setQty(1); setNote(type === "in" ? "Persiapan stok" : type === "waste" ? "Produk rusak / kedaluwarsa" : "Penyesuaian"); };
   const submitMove = () => { onMove(moveFor.id, moveType, Number(qty) || 0, note); setMoveFor(null); };
 
   return (
@@ -1520,13 +1533,28 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
                 <td><span className="idcode">{p.code}</span></td>
                 <td>
                   <div className="strong">{p.name}</div>
-                  {p.sku && <div className="muted xs">SKU {p.sku}</div>}
+                  <div className="muted xs" style={{ display: "flex", gap: 6 }}>
+                    {p.sku && <span>SKU {p.sku}</span>}
+                    {p.batchNo && <span>· {p.batchNo}</span>}
+                    {p.variants && p.variants.length > 0 && <span className="var-badge">{p.variants.map(v => v.key).join("·")}</span>}
+                  </div>
+                  {p.expiryDate && (
+                    <div className={`expiry-tag ${new Date(p.expiryDate) <= new Date(Date.now() + 7*86400000) ? "warn" : ""}`}>
+                      <AlertCircle size={10} /> Exp {p.expiryDate}
+                    </div>
+                  )}
                 </td>
                 <td className="muted">{p.category}</td>
                 <td className="r">
-                  <div className="tab">{rp(p.price)}<span className="per"> /{p.unit}</span></div>
-                  {hasCarton(p) && <div className="muted xs tab">{rp(p.priceCarton)} /ktn</div>}
-                  {hasPromo(p) && <div className="promo-mini">promo {p.promo.type === "percent" ? p.promo.value + "%" : "−" + rp(p.promo.value)}</div>}
+                  {p.variants && p.variants.length > 0 ? (
+                    <div className="muted xs">{p.variants.map((v) => <div key={v.key} className="tab">{v.key}: {rp(v.price)}</div>)}</div>
+                  ) : (
+                    <>
+                      <div className="tab">{rp(p.price)}<span className="per"> /{p.unit}</span></div>
+                      {hasCarton(p) && <div className="muted xs tab">{rp(p.priceCarton)} /ktn</div>}
+                      {hasPromo(p) && <div className="promo-mini">promo {p.promo.type === "percent" ? p.promo.value + "%" : "−" + rp(p.promo.value)}</div>}
+                    </>
+                  )}
                 </td>
                 <td className="r tab strong">{num(p.stock)} <span className="unit">{p.unit}</span></td>
                 <td className="r tab muted">{num(rop(p))}</td>
@@ -1535,6 +1563,7 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
                   <div className="row-actions">
                     <button className="mini in" onClick={() => openMove(p, "in")}><Plus size={14} /> Masuk</button>
                     <button className="mini out" onClick={() => openMove(p, "out")}><Minus size={14} /> Keluar</button>
+                    <button className="mini waste" onClick={() => openMove(p, "waste")} title="Catat produk terbuang/rusak"><AlertCircle size={13} /></button>
                     <span className="act-div" />
                     <button className="icon-btn xs" title="Edit barang" onClick={() => setFormFor(p)}><Pencil size={15} /></button>
                     <button className="icon-btn xs danger-h" title="Hapus barang" onClick={() => setDelFor(p)}><Trash2 size={15} /></button>
@@ -1550,7 +1579,7 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
       <Modal
         open={!!moveFor}
         onClose={() => setMoveFor(null)}
-        title={`Stok ${moveType === "in" ? "Masuk" : "Keluar"}`}
+        title={`Stok ${moveType === "in" ? "Masuk" : moveType === "waste" ? "Terbuang / Rusak" : "Keluar"}`}
         footer={
           <>
             <button className="btn ghost" onClick={() => setMoveFor(null)}>Batal</button>
@@ -1567,6 +1596,7 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
             <div className="seg">
               <button className={moveType === "in" ? "on" : ""} onClick={() => setMoveType("in")}>Masuk</button>
               <button className={moveType === "out" ? "on" : ""} onClick={() => setMoveType("out")}>Keluar</button>
+              <button className={moveType === "waste" ? "on" : ""} onClick={() => setMoveType("waste")}>Terbuang</button>
             </div>
             <label className="fld">
               <span>Jumlah</span>
@@ -1625,19 +1655,28 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
 function ProductForm({ product, products, categories, onClose, onSave }) {
   const [f, setF] = useState(
     product || {
-      name: "", sku: "", category: "", unit: "pcs", price: 0, cost: 0, stock: 0,
+      name: "", sku: "", category: "", unit: "cup", price: 0, cost: 0, stock: 0,
       cartonSize: 0, priceCarton: 0, promo: { active: false, type: "percent", value: 0 },
       dailyUsage: 1, leadTime: 1, safetyStock: 0,
+      variants: [], expiryDate: "", batchNo: "",
     }
   );
   const [skuTouched, setSkuTouched] = useState(!!product); // mode edit: jangan auto-ganti
+  const [variantTab, setVariantTab] = useState(false);
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const n = (k, v) => set(k, v === "" ? "" : Math.max(0, Number(v)));
   const setPromo = (patch) => setF((s) => ({ ...s, promo: { ...(s.promo || { active: false, type: "percent", value: 0 }), ...patch } }));
+
+  // Variants helpers
+  const variants = f.variants || [];
+  const hasVariants = variants.length > 0;
+  const addVariant = () => set("variants", [...variants, { key: "", label: "", price: 0, cost: 0 }]);
+  const setVariant = (i, field, val) => set("variants", variants.map((v, idx) => idx === i ? { ...v, [field]: val } : v));
+  const removeVariant = (i) => set("variants", variants.filter((_, idx) => idx !== i));
   const valid = String(f.name).trim().length > 0;
 
   const allProducts = products || [];
-  const unitOptions = Array.from(new Set([...allProducts.map((p) => p.unit).filter(Boolean), "pcs", "botol", "kg", "pack", "sachet", "box"]));
+  const unitOptions = Array.from(new Set([...allProducts.map((p) => p.unit).filter(Boolean), "cup", "porsi", "pcs", "mangkok", "pack", "botol", "kg", "sachet", "box"]));
 
   // Saat kategori berganti, SKU ikut dibuat otomatis (selama belum diubah manual)
   const onCategory = (v) =>
@@ -1652,14 +1691,21 @@ function ProductForm({ product, products, categories, onClose, onSave }) {
   const save = () => {
     if (!valid) return;
     const cat = String(f.category || "Lainnya").trim();
+    const cleanVariants = variants.filter((v) => v.key && v.key.trim()).map((v) => ({
+      key: String(v.key).trim().toUpperCase(),
+      label: String(v.label || v.key).trim(),
+      price: Number(v.price) || 0,
+      cost: Number(v.cost) || 0,
+    }));
     onSave({
       name: String(f.name).trim(),
       sku: String(f.sku || "").trim().toUpperCase() || genSku(cat, allProducts),
-      category: cat, unit: String(f.unit || "pcs").trim(),
+      category: cat, unit: String(f.unit || "cup").trim(),
       price: Number(f.price) || 0, cost: Number(f.cost) || 0, stock: Number(f.stock) || 0,
-      cartonSize: csize, priceCarton: csize > 0 ? Number(f.priceCarton) || 0 : 0,
+      cartonSize: hasVariants ? 0 : csize, priceCarton: (hasVariants || csize === 0) ? 0 : Number(f.priceCarton) || 0,
       promo: { active: !!promo.active, type: promo.type || "percent", value: Number(promo.value) || 0 },
       dailyUsage: Number(f.dailyUsage) || 0, leadTime: Number(f.leadTime) || 0, safetyStock: Number(f.safetyStock) || 0,
+      variants: cleanVariants, expiryDate: String(f.expiryDate || ""), batchNo: String(f.batchNo || "").trim(),
     });
   };
 
@@ -1685,7 +1731,7 @@ function ProductForm({ product, products, categories, onClose, onSave }) {
         )}
         <label className="fld">
           <span>Nama barang *</span>
-          <input value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="cth. Dripp Syrup Caramel 760ml" autoFocus />
+          <input value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="cth. Es Kopi Susu, Nasi Goreng Spesial…" autoFocus />
         </label>
         <div className="grid2">
           <label className="fld">
@@ -1761,11 +1807,44 @@ function ProductForm({ product, products, categories, onClose, onSave }) {
           )}
         </div>
 
+        <div className="form-section">
+          Varian Ukuran / Pilihan
+          <button type="button" className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={() => { setVariantTab(!variantTab); if (!variantTab && variants.length === 0) addVariant(); }}>
+            {hasVariants ? `${variants.length} varian aktif` : variantTab ? "Batal" : "+ Tambah varian (S/M/L)"}
+          </button>
+        </div>
+        {variantTab && (
+          <div className="variant-editor">
+            <p className="hint" style={{ marginTop: 0 }}>Jika ada varian, harga jual utama akan digantikan oleh harga per varian. Stok tetap dihitung bersama per produk.</p>
+            {variants.map((v, i) => (
+              <div key={i} className="variant-row">
+                <input className="var-key-inp" value={v.key} onChange={(e) => setVariant(i, "key", e.target.value.toUpperCase())} placeholder="S / M / L" maxLength={4} />
+                <input style={{ flex: 2 }} value={v.label} onChange={(e) => setVariant(i, "label", e.target.value)} placeholder="Label (cth. Small 200ml)" />
+                <input type="number" value={v.price} onChange={(e) => setVariant(i, "price", Math.max(0, Number(e.target.value)))} placeholder="Harga jual" />
+                <input type="number" value={v.cost} onChange={(e) => setVariant(i, "cost", Math.max(0, Number(e.target.value)))} placeholder="HPP" />
+                <button type="button" className="icon-btn xs danger-h" onClick={() => removeVariant(i)}><X size={14} /></button>
+              </div>
+            ))}
+            <button type="button" className="btn ghost sm" onClick={addVariant}><Plus size={14} /> Tambah ukuran</button>
+          </div>
+        )}
+
         <label className="fld">
           <span>Jumlah stok ({f.unit || "satuan"})</span>
           <input type="number" value={f.stock} onChange={(e) => n("stock", e.target.value)} />
           {product && <span className="hint">Mengubah jumlah akan tercatat sebagai penyesuaian di log stok.</span>}
         </label>
+
+        <div className="grid2">
+          <label className="fld">
+            <span>Tanggal kedaluwarsa</span>
+            <input type="date" value={f.expiryDate || ""} onChange={(e) => set("expiryDate", e.target.value)} />
+          </label>
+          <label className="fld">
+            <span>No. Batch / Lot</span>
+            <input value={f.batchNo || ""} onChange={(e) => set("batchNo", e.target.value)} placeholder="cth. LOT-2026-01" />
+          </label>
+        </div>
 
         <div className="form-section">Parameter perhitungan ROP</div>
         <div className="grid3">
@@ -1806,13 +1885,21 @@ function Kasir({ products, onCheckout }) {
   const list = products.filter((p) => {
     if (cat !== "all" && p.category !== cat) return false;
     const hay = (p.name + " " + p.sku + " " + p.code + " " + p.category).toLowerCase();
-    const term = q.trim().toLowerCase();
-    // alias: "beans" -> kategori biji kopi (Benih)
-    const aliased = term === "beans" || term === "biji" || term === "kopi" ? "benih" : term;
-    return hay.includes(aliased);
+    return hay.includes(q.trim().toLowerCase());
   });
-  const satuanPer = (p, mode) => (mode === "carton" ? p.cartonSize : 1);
-  const modePrice = (p, mode) => effPrice(mode === "carton" ? p.priceCarton : p.price, p.promo);
+  const pVariants = (p) => p.variants && p.variants.length > 0 ? p.variants : null;
+  const satuanPer = (p, mode) => {
+    if (pVariants(p)) return 1; // setiap varian = 1 porsi
+    return mode === "carton" ? p.cartonSize : 1;
+  };
+  const modePrice = (p, mode) => {
+    const vs = pVariants(p);
+    if (vs) {
+      const v = vs.find((x) => x.key === mode);
+      return v ? effPrice(v.price, p.promo) : effPrice(p.price, p.promo);
+    }
+    return effPrice(mode === "carton" ? p.priceCarton : p.price, p.promo);
+  };
 
   // total satuan dari produk p yang sudah masuk keranjang (semua mode)
   const committed = (pid) =>
@@ -1855,13 +1942,17 @@ function Kasir({ products, onCheckout }) {
       debtor: debtor.trim(), business: business.trim(), phone: phone.trim(),
       paid: isCash ? Number(paid) || total : total,
       change: isCash ? Math.max(0, change) : 0,
-      items: lines.map((l) => ({
-        pid: l.pid,
-        name: l.p.name,
-        qtyLabel: `${l.qty} ${l.mode === "carton" ? "karton" : l.p.unit}`,
-        qty: l.satuan,
-        lineTotal: l.lineTotal,
-      })),
+      items: lines.map((l) => {
+        const vs = pVariants(l.p);
+        const vLabel = vs ? (vs.find((x) => x.key === l.mode)?.label || l.mode) : null;
+        return {
+          pid: l.pid,
+          name: l.p.name + (vLabel ? ` (${l.mode})` : ""),
+          qtyLabel: `${l.qty} ${vLabel ? vLabel : l.mode === "carton" ? "karton" : l.p.unit}`,
+          qty: l.satuan,
+          lineTotal: l.lineTotal,
+        };
+      }),
     };
     onCheckout(lines.map((l) => ({ pid: l.pid, qty: l.satuan })), total, method, meta);
     setCart({}); setPaid(""); setDebtor(""); setBusiness(""); setPhone(""); setMethod("cash");
@@ -1906,15 +1997,30 @@ function Kasir({ products, onCheckout }) {
                 </div>
                 <div className="pos-name">{p.name}{hasPromo(p) && <span className="promo-tag">PROMO</span>}</div>
                 <div className="pos-price">
-                  {hasPromo(p) && <span className="strike">{rp(p.price)}</span>}
-                  {rp(unitEff)} <span className="per">/ {p.unit}</span>
+                  {pVariants(p) ? (
+                    <span className="per">{pVariants(p).length} ukuran tersedia</span>
+                  ) : (
+                    <>{hasPromo(p) && <span className="strike">{rp(p.price)}</span>}
+                    {rp(unitEff)} <span className="per">/ {p.unit}</span></>
+                  )}
                 </div>
                 <div className="pos-add">
-                  <button className="add-btn" disabled={left < 1} onClick={() => add(p, "unit")}><Plus size={13} /> Satuan</button>
-                  {carton && (
-                    <button className="add-btn carton" disabled={left < p.cartonSize} onClick={() => add(p, "carton")}>
-                      <Plus size={13} /> Karton<span className="add-sub">{rp(cartonEff)}</span>
-                    </button>
+                  {pVariants(p) ? (
+                    pVariants(p).map((v) => (
+                      <button key={v.key} className="add-btn variant" disabled={left < 1} onClick={() => add(p, v.key)}>
+                        <span className="var-key">{v.key}</span>
+                        <span className="add-sub">{rp(effPrice(v.price, p.promo))}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <>
+                      <button className="add-btn" disabled={left < 1} onClick={() => add(p, "unit")}><Plus size={13} /> {p.unit}</button>
+                      {carton && (
+                        <button className="add-btn carton" disabled={left < p.cartonSize} onClick={() => add(p, "carton")}>
+                          <Plus size={13} /> Karton<span className="add-sub">{rp(cartonEff)}</span>
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -1944,7 +2050,11 @@ function Kasir({ products, onCheckout }) {
               <div className="cart-line-info">
                 <div className="cart-line-name">{l.p.name}</div>
                 <div className="muted xs">
-                  {l.mode === "carton" ? `karton (${l.p.cartonSize} ${l.p.unit})` : `per ${l.p.unit}`} · {rp(l.each)}
+                  {(() => {
+                    const vs = pVariants(l.p);
+                    if (vs) { const v = vs.find((x) => x.key === l.mode); return (v?.label || l.mode) + " · " + rp(l.each); }
+                    return (l.mode === "carton" ? `karton (${l.p.cartonSize} ${l.p.unit})` : `per ${l.p.unit}`) + " · " + rp(l.each);
+                  })()}
                 </div>
               </div>
               <div className="stepper sm">
@@ -3294,13 +3404,17 @@ function Style() {
       .tbl tbody tr:last-child td{border-bottom:none}
       .tbl tbody tr:hover{background:var(--surface-2)}
       .mv{display:inline-flex;align-items:center;gap:4px;font-weight:600;font-size:12.5px}
-      .mv.in{color:var(--ok)} .mv.out{color:var(--crit)}
+      .mv.in{color:var(--ok)} .mv.out{color:var(--crit)} .mv.waste{color:#f59e0b}
       .row-actions{display:inline-flex;gap:6px}
       .mini{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);background:var(--surface);
         padding:5px 10px;border-radius:8px;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;color:var(--ink-soft)}
       .mini:hover{background:var(--surface-2)}
       .mini.in:hover{border-color:var(--ok);color:var(--ok)}
       .mini.out:hover{border-color:var(--crit);color:var(--crit)}
+      .mini.waste:hover{border-color:#f59e0b;color:#f59e0b}
+      .expiry-tag{display:inline-flex;align-items:center;gap:3px;font-size:10px;color:var(--ink-faint);margin-top:2px}
+      .expiry-tag.warn{color:#f59e0b;font-weight:600}
+      .var-badge{background:var(--accent-soft);color:var(--accent);font-size:9px;font-weight:700;padding:1px 5px;border-radius:4px;letter-spacing:.04em}
 
       /* toolbar */
       .toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
@@ -3356,10 +3470,13 @@ function Style() {
       .fld .hint{font-size:11.5px;color:var(--ink-faint)}
       .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
       .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
-      .form-section{font-size:12px;font-weight:600;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.04em;
+      .form-section{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.04em;
         border-top:1px solid var(--line-soft);padding-top:14px;margin-top:2px}
       .rop-preview{background:var(--accent-soft);color:var(--accent);border-radius:10px;padding:11px 13px;font-size:13px}
       .rop-preview b{font-family:'Space Grotesk';font-size:15px}
+      .variant-editor{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px}
+      .variant-row{display:flex;gap:6px;align-items:center}
+      .var-key-inp{width:52px;flex-shrink:0;text-align:center;font-weight:700;text-transform:uppercase}
       .confirm-text{font-size:14px;color:var(--ink-soft);line-height:1.55}
       .btn.danger{background:var(--crit)} .btn.danger:hover{background:#a23a30}
 
@@ -3457,7 +3574,10 @@ function Style() {
       .add-btn:active:not(:disabled) .add-sub{color:rgba(255,255,255,.85)}
       .add-btn:disabled{opacity:.4;cursor:not-allowed}
       .add-btn.carton{color:var(--ink)}
+      .add-btn.variant{flex-direction:row;gap:6px;justify-content:space-between;padding:0 10px}
+      .add-btn.variant .var-key{font-weight:700;font-size:13px;min-width:18px}
       .add-btn .add-sub{font-family:'Space Grotesk';font-weight:600;font-size:10.5px;color:var(--ink-faint)}
+      .add-btn.variant:hover:not(:disabled) .add-sub,.add-btn.variant:active:not(:disabled) .add-sub{color:rgba(255,255,255,.85)}
 
       .inline-fld{display:flex;gap:8px;align-items:center}
       .inline-fld input{flex:1}
