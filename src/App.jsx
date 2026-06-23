@@ -2597,7 +2597,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
     const have = new Set(monthExpenses.map((e) => (e.name + "|" + e.category).toLowerCase()));
     const src = prevExpenses.filter((e) => !have.has((e.name + "|" + e.category).toLowerCase()));
     if (src.length === 0) { flash && flash(`Tidak ada biaya baru untuk disalin dari ${periodLabel(prev)}`); return; }
-    src.forEach((e) => onAddExpense({ name: e.name, amount: e.amount, category: e.category, period: month, date: periodLabel(month) }));
+    src.forEach((e) => onAddExpense({ name: e.name, amount: e.amount, category: e.category, period: month, date: periodLabel(month), items: e.items || [] }));
     flash && flash(`${src.length} biaya disalin dari ${periodLabel(prev)} — silakan sesuaikan nilainya`);
   };
 
@@ -2748,7 +2748,10 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
       r = banner(s3, "Biaya Operasional");
       sectionTitle(s3, r, `BIAYA OPERASIONAL — ${period}`); r++;
       headRow(s3, r, [{ h: "Biaya" }, { h: "Kategori" }, { h: "Periode" }, { h: "Nilai", a: "right" }]); r++;
-      monthExpenses.forEach((e, idx) => dataRow(s3, r++, [{ v: e.name }, { v: e.category }, { v: e.period ? periodLabel(e.period) : e.date }, { v: e.amount, a: "right", fmt: money }], idx));
+      monthExpenses.forEach((e, idx) => {
+        dataRow(s3, r++, [{ v: e.name }, { v: e.category }, { v: e.period ? periodLabel(e.period) : e.date }, { v: e.amount, a: "right", fmt: money }], idx);
+        (e.items || []).forEach((it) => dataRow(s3, r++, [{ v: "   • " + it.label }, { v: "" }, { v: "" }, { v: it.amount, a: "right", fmt: money }], idx));
+      });
       totalRow(s3, r++, "TOTAL OPERASIONAL", opex, 3, C.coral);
 
       // ---------- Sheet 4: Penjualan per Barang ----------
@@ -2967,7 +2970,12 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
             <tbody>
               {monthExpenses.map((e) => (
                 <tr key={e.id}>
-                  <td><div className="strong">{e.name}</div><div className="muted xs">{e.period ? periodLabel(e.period) : e.date}</div></td>
+                  <td>
+                    <div className="strong">{e.name}</div>
+                    {(e.items && e.items.length > 0)
+                      ? <div className="exp-items">{e.items.map((it, i) => <span key={i} className="exp-item">{it.label} · {rp(it.amount)}</span>)}</div>
+                      : <div className="muted xs">{e.period ? periodLabel(e.period) : e.date}</div>}
+                  </td>
                   <td><span className="cat-tag">{e.category}</span></td>
                   <td className="r tab">{rp(e.amount)}</td>
                   <td className="r"><div className="row-actions">
@@ -3019,21 +3027,32 @@ function EntryForm({ kind, entry, defaultPeriod, onClose, onSave }) {
     date: kind === "capital" ? "Modal awal" : "Bln ini",
     category: "Operasional",
     period: defaultPeriod || thisPeriod(),
+    items: [],
   });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
-  const valid = String(f.name).trim().length > 0 && Number(f.amount) > 0;
+  const items = f.items || [];
+  const itemsTotal = items.reduce((a, it) => a + (Number(it.amount) || 0), 0);
+  const useItems = kind === "expense" && items.length > 0;
+  const total = useItems ? itemsTotal : Number(f.amount) || 0;
+
+  const addItem = () => setF((s) => ({ ...s, items: [...(s.items || []), { label: "", amount: 0 }] }));
+  const setItem = (i, k, v) => setF((s) => ({ ...s, items: s.items.map((it, idx) => (idx === i ? { ...it, [k]: v } : it)) }));
+  const delItem = (i) => setF((s) => ({ ...s, items: s.items.filter((_, idx) => idx !== i) }));
+
+  const valid = String(f.name).trim().length > 0 && total > 0 && (!useItems || items.every((it) => String(it.label).trim()));
   const save = () => {
     if (!valid) return;
     if (kind === "expense") {
       const period = f.period || thisPeriod();
-      onSave({ name: String(f.name).trim(), amount: Number(f.amount) || 0, category: f.category || "Lain-lain", period, date: periodLabel(period) });
+      const cleanItems = items.map((it) => ({ label: String(it.label).trim(), amount: Number(it.amount) || 0 })).filter((it) => it.label);
+      onSave({ name: String(f.name).trim(), amount: total, category: f.category || "Lain-lain", period, date: periodLabel(period), items: cleanItems });
     } else {
       onSave({ name: String(f.name).trim(), amount: Number(f.amount) || 0, date: String(f.date || "").trim() || "-" });
     }
   };
   return (
     <Modal
-      open onClose={onClose} width={460}
+      open onClose={onClose} width={480}
       title={`${entry ? "Edit" : "Tambah"} ${kind === "capital" ? "Modal / Investasi" : "Biaya Operasional"}`}
       footer={<>
         <button className="btn ghost" onClick={onClose}>Batal</button>
@@ -3049,9 +3068,30 @@ function EntryForm({ kind, entry, defaultPeriod, onClose, onSave }) {
               {EXPENSE_CATS.map((c) => <option key={c} value={c}>{c}</option>)}
             </select></label>
         )}
+
+        {kind === "expense" && (
+          <div className="fld">
+            <div className="rincian-head">
+              <span>Rincian (opsional)</span>
+              <button type="button" className="btn ghost xs" onClick={addItem}><Plus size={13} /> Tambah rincian</button>
+            </div>
+            {items.length === 0 && <div className="muted xs">Tanpa rincian, cukup isi total di bawah. Dengan rincian (mis. Karyawan 1, Karyawan 2), total dijumlah otomatis.</div>}
+            {items.map((it, i) => (
+              <div key={i} className="rincian-row">
+                <input className="ri-label" value={it.label} onChange={(e) => setItem(i, "label", e.target.value)} placeholder={`cth. ${f.category === "Gaji" ? "Karyawan " + (i + 1) : f.category === "Utilitas" ? "Listrik" : "Item " + (i + 1)}`} />
+                <input className="ri-amt" type="number" min="0" value={it.amount} onChange={(e) => setItem(i, "amount", Math.max(0, Number(e.target.value)))} placeholder="0" />
+                <button type="button" className="icon-btn xs danger-h" onClick={() => delItem(i)}><X size={14} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div className="grid2">
-          <label className="fld"><span>Nilai (Rp)</span>
-            <input type="number" value={f.amount} onChange={(e) => set("amount", Math.max(0, Number(e.target.value)))} /></label>
+          <label className="fld"><span>{useItems ? "Total (otomatis)" : "Nilai (Rp)"}</span>
+            {useItems
+              ? <input value={rp(total)} disabled />
+              : <input type="number" value={f.amount} onChange={(e) => set("amount", Math.max(0, Number(e.target.value)))} />}
+          </label>
           {kind === "expense" ? (
             <label className="fld"><span>Bulan</span>
               <input type="month" value={f.period} onChange={(e) => set("period", e.target.value)} /></label>
@@ -3209,6 +3249,14 @@ function Style() {
       .leak-cat{font-weight:600}
       .leak-delta.up{color:var(--crit)} .leak-delta.down{color:var(--ok)}
       .leak-row .r,.leak-head .r{text-align:right}
+      .rincian-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+      .rincian-head>span{font-size:13px;font-weight:500;color:var(--ink-soft)}
+      .btn.xs{padding:5px 9px;font-size:12px;border-radius:8px}
+      .rincian-row{display:flex;gap:7px;align-items:center;margin-top:6px}
+      .rincian-row .ri-label{flex:1;border:1px solid var(--line);background:var(--surface-2);border-radius:var(--r-xs);padding:9px 10px;color:var(--ink);font:inherit;font-size:13.5px}
+      .rincian-row .ri-amt{width:118px;border:1px solid var(--line);background:var(--surface-2);border-radius:var(--r-xs);padding:9px 10px;color:var(--ink);font:inherit;font-size:13.5px}
+      .exp-items{display:flex;flex-direction:column;gap:1px;margin-top:3px}
+      .exp-item{font-size:11.5px;color:var(--ink-faint)}
       .cat-tag{font-size:11px;font-weight:600;color:var(--teal);background:var(--teal-soft);padding:2px 8px;border-radius:6px}
       .tbl tfoot td{padding:12px 16px;border-top:1px solid var(--line);font-size:13.5px;background:var(--surface-2)}
       @media(max-width:980px){ .acc-grid{grid-template-columns:repeat(2,1fr)} .grid-2{grid-template-columns:1fr} }

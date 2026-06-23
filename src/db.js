@@ -123,7 +123,7 @@ export const Capital = {
   async remove(id) { const { error } = await supabase.from("capital").delete().eq("id", id); if (error) throw error; },
 };
 export const Expenses = {
-  async list() { const { data, error } = await supabase.from("expenses").select("*").order("created_at"); if (error) throw error; return data.map((r) => ({ ...r, amount: Number(r.amount) })); },
+  async list() { const { data, error } = await supabase.from("expenses").select("*").order("created_at"); if (error) throw error; return data.map((r) => ({ ...r, amount: Number(r.amount), items: r.items || [] })); },
   async create(e) { const { data, error } = await supabase.from("expenses").insert(e).select().single(); if (error) throw error; return data; },
   async update(id, e) { const { error } = await supabase.from("expenses").update(e).eq("id", id); if (error) throw error; },
   async remove(id) { const { error } = await supabase.from("expenses").delete().eq("id", id); if (error) throw error; },
