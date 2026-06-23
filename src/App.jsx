@@ -43,6 +43,12 @@ const invoiceNo = () => {
   return `INV-${String(d.getFullYear()).slice(2)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 };
 
+// Periode bulan (YYYY-MM) -> label ramah; bulan sekarang & bulan sebelumnya
+const ID_MONTHS = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
+const periodLabel = (ym) => { if (!ym) return "-"; const [y, m] = String(ym).split("-").map(Number); return `${ID_MONTHS[(m || 1) - 1]} ${y}`; };
+const thisPeriod = () => new Date().toISOString().slice(0, 7);
+const prevPeriod = (ym) => { const [y, m] = String(ym).split("-").map(Number); const d = new Date(y, (m || 1) - 1, 1); d.setMonth(d.getMonth() - 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
+
 // Siklus order / periode review (hari) — dipakai untuk saran jumlah re-stok
 const REVIEW_DAYS = 7;
 
@@ -2561,12 +2567,59 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
   const revenue = tot.revenue;
   const cogs = tot.cost;
   const gross = revenue - cogs;
-  const opex = expenses.reduce((a, e) => a + e.amount, 0);
+
+  // Biaya operasional periode terpilih + bulan sebelumnya (deteksi kebocoran)
+  const prev = prevPeriod(month);
+  const monthExpenses = expenses.filter((e) => (e.period || "") === month);
+  const prevExpenses = expenses.filter((e) => (e.period || "") === prev);
+  const opex = monthExpenses.reduce((a, e) => a + e.amount, 0);
+  const prevOpex = prevExpenses.reduce((a, e) => a + e.amount, 0);
   const net = gross - opex;
   const invValue = products.reduce((a, p) => a + p.cost * p.stock, 0);
   const grossMargin = revenue > 0 ? Math.round((gross / revenue) * 100) : 0;
   const paybackMonths = net > 0 ? Math.ceil(totalModal / net) : null;
   const roiBulan = totalModal > 0 ? (net / totalModal) * 100 : 0;
+
+  // opex per kategori (bulan terpilih)
+  const opexCat = {};
+  monthExpenses.forEach((e) => { opexCat[e.category] = (opexCat[e.category] || 0) + e.amount; });
+  const prevOpexCat = {};
+  prevExpenses.forEach((e) => { prevOpexCat[e.category] = (prevOpexCat[e.category] || 0) + e.amount; });
+  // perbandingan per kategori: bulan lalu vs bulan ini
+  const catCompare = [...new Set([...Object.keys(opexCat), ...Object.keys(prevOpexCat)])]
+    .map((cat) => { const now = opexCat[cat] || 0; const was = prevOpexCat[cat] || 0; return { cat, now, was, delta: now - was, pct: was > 0 ? Math.round(((now - was) / was) * 100) : (now > 0 ? 100 : 0) }; })
+    .sort((a, b) => b.delta - a.delta);
+
+  // rasio biaya terhadap pendapatan (efisiensi) — naik = perlu dicek
+  const opexRatio = revenue > 0 ? Math.round((opex / revenue) * 100) : 0;
+
+  const copyLastMonth = () => {
+    const have = new Set(monthExpenses.map((e) => (e.name + "|" + e.category).toLowerCase()));
+    const src = prevExpenses.filter((e) => !have.has((e.name + "|" + e.category).toLowerCase()));
+    if (src.length === 0) { flash && flash(`Tidak ada biaya baru untuk disalin dari ${periodLabel(prev)}`); return; }
+    src.forEach((e) => onAddExpense({ name: e.name, amount: e.amount, category: e.category, period: month, date: periodLabel(month) }));
+    flash && flash(`${src.length} biaya disalin dari ${periodLabel(prev)} — silakan sesuaikan nilainya`);
+  };
+
+  // Tren 6 bulan (pendapatan, biaya, laba bersih)
+  const [trend, setTrend] = useState([]);
+  useEffect(() => {
+    const base = new Date();
+    const periods = [];
+    for (let i = 5; i >= 0; i--) { const d = new Date(base.getFullYear(), base.getMonth() - i, 1); periods.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`); }
+    const opexByP = {};
+    expenses.forEach((e) => { if (e.period) opexByP[e.period] = (opexByP[e.period] || 0) + e.amount; });
+    const build = (sm) => periods.map((p) => { const s = sm[p] || { revenue: 0, cost: 0 }; const op = opexByP[p] || 0; const rev = Number(s.revenue || 0), cost = Number(s.cost || 0); return { period: p, label: periodLabel(p), pendapatan: rev, biaya: op, laba: rev - cost - op }; });
+    if (!hasSupabase) {
+      const sm = {};
+      salesLog.forEach((s) => { if (s.ts) { const k = new Date(s.ts).toISOString().slice(0, 7); if (!sm[k]) sm[k] = { revenue: 0, cost: 0 }; sm[k].revenue += s.revenue; sm[k].cost += s.cost; } });
+      setTrend(build(sm)); return;
+    }
+    let alive = true;
+    const fromISO = new Date(base.getFullYear(), base.getMonth() - 5, 1).toISOString();
+    Sales.monthly(fromISO).then((rows) => { if (!alive) return; setTrend(build(Object.fromEntries(rows.map((r) => [r.period, r])))); }).catch((e) => console.error("[trend]", e));
+    return () => { alive = false; };
+  }, [salesLog, expenses]);
 
   // analisa per barang (dari agregat server)
   const items = byProd.map((v) => {
@@ -2575,10 +2628,6 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
     return { pid: v.productId, name: p?.name || "—", sku: p?.sku || "", unit: p?.unit || "", qty: v.qty, revenue: v.revenue, cost: v.cost, profit, margin: v.revenue > 0 ? Math.round((profit / v.revenue) * 100) : 0 };
   }).sort((a, b) => b.profit - a.profit);
   const topChart = items.slice(0, 7).map((i) => ({ name: i.sku || i.name.slice(0, 10), profit: i.profit }));
-
-  // opex per kategori
-  const opexCat = {};
-  expenses.forEach((e) => { opexCat[e.category] = (opexCat[e.category] || 0) + e.amount; });
 
   const MONTHS_ID = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
   const monthLabel = (ym) => { const [y, m] = ym.split("-").map(Number); return `${MONTHS_ID[(m || 1) - 1]} ${y}`; };
@@ -2699,7 +2748,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
       r = banner(s3, "Biaya Operasional");
       sectionTitle(s3, r, `BIAYA OPERASIONAL — ${period}`); r++;
       headRow(s3, r, [{ h: "Biaya" }, { h: "Kategori" }, { h: "Periode" }, { h: "Nilai", a: "right" }]); r++;
-      expenses.forEach((e, idx) => dataRow(s3, r++, [{ v: e.name }, { v: e.category }, { v: e.date }, { v: e.amount, a: "right", fmt: money }], idx));
+      monthExpenses.forEach((e, idx) => dataRow(s3, r++, [{ v: e.name }, { v: e.category }, { v: e.period ? periodLabel(e.period) : e.date }, { v: e.amount, a: "right", fmt: money }], idx));
       totalRow(s3, r++, "TOTAL OPERASIONAL", opex, 3, C.coral);
 
       // ---------- Sheet 4: Penjualan per Barang ----------
@@ -2833,6 +2882,54 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
         </div>
       </section>
 
+      <div className="grid-2-1">
+        <section className="card">
+          <div className="card-head"><h2>Tren 6 bulan</h2><span className="muted">pendapatan vs biaya</span></div>
+          <div className="chart-wrap">
+            <ResponsiveContainer width="100%" height={230}>
+              <BarChart data={trend} margin={{ top: 8, right: 8, left: -6, bottom: 0 }}>
+                <CartesianGrid stroke="#2C3A33" vertical={false} />
+                <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "#6F8077", fontSize: 11 }} />
+                <YAxis tickFormatter={(v) => (v >= 1000000 ? `${(v / 1000000).toFixed(0)}jt` : v >= 1000 ? `${Math.round(v / 1000)}rb` : v)} tickLine={false} axisLine={false} tick={{ fill: "#6F8077", fontSize: 11 }} width={42} />
+                <Tooltip formatter={(v, n) => [rp(v), n]} contentStyle={{ borderRadius: 12, border: "1px solid #2C3A33", background: "#1B2521", color: "#ECE7DA", fontFamily: "Inter", fontSize: 13 }} labelStyle={{ color: "#9DAEA3" }} />
+                <Bar dataKey="pendapatan" name="Pendapatan" fill="#6FAE92" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="biaya" name="Biaya" fill="#E2514D" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="trend-legend">
+            <span><i className="dot teal" /> Pendapatan</span>
+            <span><i className="dot coral" /> Biaya operasional</span>
+            <span className="muted xs">Laba {periodLabel(month)}: <b style={{ color: net >= 0 ? "var(--ok)" : "var(--crit)" }}>{rp(net)}</b></span>
+          </div>
+        </section>
+
+        <section className="card">
+          <div className="card-head"><h2>Deteksi kebocoran</h2></div>
+          <div className="leak-ratio">
+            <div>
+              <div className="muted xs">Rasio biaya / pendapatan</div>
+              <div className={`leak-big ${opexRatio > 60 ? "bad" : opexRatio > 40 ? "warn" : "ok"}`}>{opexRatio}%</div>
+            </div>
+            <div className="muted xs" style={{ textAlign: "right" }}>{periodLabel(month)}<br />makin tinggi makin perlu dicek</div>
+          </div>
+          <div className="leak-list">
+            <div className="leak-head"><span>Kategori</span><span className="r">{periodLabel(prev)}</span><span className="r">{periodLabel(month)}</span><span className="r">Selisih</span></div>
+            {catCompare.length === 0 && <div className="empty">Belum ada biaya pada periode ini.</div>}
+            {catCompare.map((c) => (
+              <div key={c.cat} className="leak-row">
+                <span className="leak-cat">{c.cat}</span>
+                <span className="r muted tab">{rp(c.was)}</span>
+                <span className="r tab">{rp(c.now)}</span>
+                <span className={`r tab leak-delta ${c.delta > 0 ? "up" : c.delta < 0 ? "down" : ""}`}>
+                  {c.delta > 0 ? "+" : ""}{rp(c.delta)}{c.was > 0 ? ` (${c.pct > 0 ? "+" : ""}${c.pct}%)` : ""}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+
       <div className="grid-2">
         <section className="card pad0">
           <div className="card-head" style={{ padding: "18px 18px 0" }}>
@@ -2858,16 +2955,19 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
         </section>
 
         <section className="card pad0">
-          <div className="card-head" style={{ padding: "18px 18px 0" }}>
-            <h2>Biaya Operasional</h2>
-            <button className="btn sm" onClick={() => setForm({ kind: "expense", entry: null })}><Plus size={14} /> Tambah</button>
+          <div className="card-head" style={{ padding: "18px 18px 0", flexWrap: "wrap", gap: 8 }}>
+            <h2>Biaya Operasional · {periodLabel(month)}</h2>
+            <div className="row-actions">
+              <button className="btn ghost sm" onClick={copyLastMonth}><RefreshCcw size={14} /> Salin {periodLabel(prev)}</button>
+              <button className="btn sm" onClick={() => setForm({ kind: "expense", entry: null })}><Plus size={14} /> Tambah</button>
+            </div>
           </div>
           <table className="tbl">
             <thead><tr><th>Biaya</th><th>Kategori</th><th className="r">Nilai</th><th className="r">Aksi</th></tr></thead>
             <tbody>
-              {expenses.map((e) => (
+              {monthExpenses.map((e) => (
                 <tr key={e.id}>
-                  <td><div className="strong">{e.name}</div><div className="muted xs">{e.date}</div></td>
+                  <td><div className="strong">{e.name}</div><div className="muted xs">{e.period ? periodLabel(e.period) : e.date}</div></td>
                   <td><span className="cat-tag">{e.category}</span></td>
                   <td className="r tab">{rp(e.amount)}</td>
                   <td className="r"><div className="row-actions">
@@ -2876,6 +2976,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
                   </div></td>
                 </tr>
               ))}
+              {monthExpenses.length === 0 && <tr><td colSpan={4} className="empty">Belum ada biaya untuk {periodLabel(month)}. Klik “Salin {periodLabel(prev)}” atau “Tambah”.</td></tr>}
             </tbody>
             <tfoot><tr><td className="strong" colSpan={2}>Total operasional</td><td className="r tab strong">{rp(opex)}</td><td /></tr></tfoot>
           </table>
@@ -2884,7 +2985,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
 
       {form && (
         <EntryForm
-          kind={form.kind} entry={form.entry}
+          kind={form.kind} entry={form.entry} defaultPeriod={month}
           onClose={() => setForm(null)}
           onSave={(data) => {
             if (form.kind === "capital") form.entry ? onUpdateCapital(form.entry.id, data) : onAddCapital(data);
@@ -2912,14 +3013,23 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
   );
 }
 
-function EntryForm({ kind, entry, onClose, onSave }) {
-  const [f, setF] = useState(entry || { name: "", amount: 0, date: kind === "capital" ? "Modal awal" : "Bln ini", category: "Operasional" });
+function EntryForm({ kind, entry, defaultPeriod, onClose, onSave }) {
+  const [f, setF] = useState(entry || {
+    name: "", amount: 0,
+    date: kind === "capital" ? "Modal awal" : "Bln ini",
+    category: "Operasional",
+    period: defaultPeriod || thisPeriod(),
+  });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const valid = String(f.name).trim().length > 0 && Number(f.amount) > 0;
   const save = () => {
     if (!valid) return;
-    const base = { name: String(f.name).trim(), amount: Number(f.amount) || 0, date: String(f.date || "").trim() || "-" };
-    onSave(kind === "expense" ? { ...base, category: f.category || "Lain-lain" } : base);
+    if (kind === "expense") {
+      const period = f.period || thisPeriod();
+      onSave({ name: String(f.name).trim(), amount: Number(f.amount) || 0, category: f.category || "Lain-lain", period, date: periodLabel(period) });
+    } else {
+      onSave({ name: String(f.name).trim(), amount: Number(f.amount) || 0, date: String(f.date || "").trim() || "-" });
+    }
   };
   return (
     <Modal
@@ -2942,8 +3052,13 @@ function EntryForm({ kind, entry, onClose, onSave }) {
         <div className="grid2">
           <label className="fld"><span>Nilai (Rp)</span>
             <input type="number" value={f.amount} onChange={(e) => set("amount", Math.max(0, Number(e.target.value)))} /></label>
-          <label className="fld"><span>Tanggal / periode</span>
-            <input value={f.date} onChange={(e) => set("date", e.target.value)} placeholder="cth. Bln ini" /></label>
+          {kind === "expense" ? (
+            <label className="fld"><span>Bulan</span>
+              <input type="month" value={f.period} onChange={(e) => set("period", e.target.value)} /></label>
+          ) : (
+            <label className="fld"><span>Tanggal / periode</span>
+              <input value={f.date} onChange={(e) => set("date", e.target.value)} placeholder="cth. Modal awal" /></label>
+          )}
         </div>
       </div>
     </Modal>
@@ -3081,6 +3196,19 @@ function Style() {
       .payback-bar>div{height:100%;background:var(--accent);border-radius:6px}
       .payback-meta{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;width:100%;margin-top:8px}
       .payback-meta b{font-family:'Space Grotesk';font-size:14px;display:block;margin-top:2px}
+      .trend-legend{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--ink-soft)}
+      .trend-legend .dot{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:5px;vertical-align:middle}
+      .trend-legend .dot.teal{background:var(--teal)} .trend-legend .dot.coral{background:var(--accent)}
+      .leak-ratio{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-sm);padding:12px 14px;margin-bottom:12px}
+      .leak-big{font-family:'Space Grotesk';font-weight:700;font-size:26px;line-height:1.1}
+      .leak-big.ok{color:var(--ok)} .leak-big.warn{color:var(--gold)} .leak-big.bad{color:var(--crit)}
+      .leak-list{display:flex;flex-direction:column}
+      .leak-head,.leak-row{display:grid;grid-template-columns:1.4fr 1fr 1fr 1.3fr;gap:8px;align-items:center;padding:8px 2px}
+      .leak-head{font-size:11px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--line)}
+      .leak-row{border-bottom:1px solid var(--line-soft);font-size:13px}
+      .leak-cat{font-weight:600}
+      .leak-delta.up{color:var(--crit)} .leak-delta.down{color:var(--ok)}
+      .leak-row .r,.leak-head .r{text-align:right}
       .cat-tag{font-size:11px;font-weight:600;color:var(--teal);background:var(--teal-soft);padding:2px 8px;border-radius:6px}
       .tbl tfoot td{padding:12px 16px;border-top:1px solid var(--line);font-size:13.5px;background:var(--surface-2)}
       @media(max-width:980px){ .acc-grid{grid-template-columns:repeat(2,1fr)} .grid-2{grid-template-columns:1fr} }

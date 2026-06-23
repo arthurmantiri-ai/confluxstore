@@ -163,6 +163,12 @@ export const Sales = {
     if (error) throw error;
     return (data || []).map((r) => ({ productId: r.product_id, qty: Number(r.qty), revenue: Number(r.revenue), cost: Number(r.cost) }));
   },
+  // Per bulan (untuk tren); from = ISO atau null
+  async monthly(fromISO) {
+    const { data, error } = await supabase.rpc("sales_monthly", { p_from: fromISO ?? null });
+    if (error) throw error;
+    return (data || []).map((r) => ({ period: r.period, revenue: Number(r.revenue), cost: Number(r.cost) }));
+  },
 };
 
 /* ============================ SETTINGS ============================ */
