@@ -713,7 +713,7 @@ export default function App() {
   const loadAll = async () => {
     const res = await Promise.allSettled([
       Products.list(), Movements.list(), OrdersApi.list(), DebtsApi.list(),
-      Capital.list(), Expenses.list(), Sales.list(), SettingsApi.get(),
+      Capital.list(), Expenses.list(), Sales.list({ sinceDays: 90 }), SettingsApi.get(),
     ]);
     const [p, mv, od, dz, cap, exp, sl, st] = res;
     if (p.status === "fulfilled") setProducts(p.value);
@@ -1407,7 +1407,7 @@ function SalesHistory({ salesLog, products }) {
       <div className="acc-toolbar">
         <div className="seg">
           <button className={`seg-btn ${range === "today" ? "on" : ""}`} onClick={() => setRange("today")}>Hari ini</button>
-          <button className={`seg-btn ${range === "all" ? "on" : ""}`} onClick={() => setRange("all")}>Semua</button>
+          <button className={`seg-btn ${range === "all" ? "on" : ""}`} onClick={() => setRange("all")}>90 hari</button>
         </div>
         <div className="muted" style={{ fontSize: 13 }}>{list.length} transaksi · {rp(total)}</div>
       </div>
@@ -2533,8 +2533,33 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
   const [exporting, setExporting] = useState(false);
 
   const totalModal = capital.reduce((a, c) => a + c.amount, 0);
-  const revenue = salesLog.reduce((a, s) => a + s.revenue, 0);
-  const cogs = salesLog.reduce((a, s) => a + s.cost, 0);
+
+  // Agregat penjualan untuk periode terpilih (dihitung di server agar akurat & ringan)
+  const [tot, setTot] = useState({ revenue: 0, cost: 0, qty: 0 });
+  const [byProd, setByProd] = useState([]);
+  const [loadingAcc, setLoadingAcc] = useState(hasSupabase);
+
+  useEffect(() => {
+    const [yy, mm] = month.split("-").map(Number);
+    const fromISO = new Date(yy, mm - 1, 1).toISOString();
+    const toISO = new Date(yy, mm, 1).toISOString();
+    if (!hasSupabase) {
+      const a = salesLog.reduce((x, s) => ({ revenue: x.revenue + s.revenue, cost: x.cost + s.cost, qty: x.qty + s.qty }), { revenue: 0, cost: 0, qty: 0 });
+      const m = {};
+      salesLog.forEach((s) => { if (!m[s.productId]) m[s.productId] = { productId: s.productId, qty: 0, revenue: 0, cost: 0 }; m[s.productId].qty += s.qty; m[s.productId].revenue += s.revenue; m[s.productId].cost += s.cost; });
+      setTot(a); setByProd(Object.values(m)); setLoadingAcc(false);
+      return;
+    }
+    let alive = true; setLoadingAcc(true);
+    Promise.all([Sales.agg(fromISO, toISO), Sales.byProduct(fromISO, toISO)])
+      .then(([a, bp]) => { if (!alive) return; setTot(a); setByProd(bp); })
+      .catch((e) => { console.error("[acc]", e); flash && flash("Gagal memuat ringkasan akuntansi"); })
+      .finally(() => { if (alive) setLoadingAcc(false); });
+    return () => { alive = false; };
+  }, [month, salesLog]);
+
+  const revenue = tot.revenue;
+  const cogs = tot.cost;
   const gross = revenue - cogs;
   const opex = expenses.reduce((a, e) => a + e.amount, 0);
   const net = gross - opex;
@@ -2543,16 +2568,11 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
   const paybackMonths = net > 0 ? Math.ceil(totalModal / net) : null;
   const roiBulan = totalModal > 0 ? (net / totalModal) * 100 : 0;
 
-  // analisa per barang
-  const agg = {};
-  salesLog.forEach((s) => {
-    if (!agg[s.productId]) agg[s.productId] = { qty: 0, revenue: 0, cost: 0 };
-    agg[s.productId].qty += s.qty; agg[s.productId].revenue += s.revenue; agg[s.productId].cost += s.cost;
-  });
-  const items = Object.entries(agg).map(([pid, v]) => {
-    const p = products.find((x) => x.id === pid);
+  // analisa per barang (dari agregat server)
+  const items = byProd.map((v) => {
+    const p = products.find((x) => x.id === v.productId);
     const profit = v.revenue - v.cost;
-    return { pid, name: p?.name || "—", sku: p?.sku || "", unit: p?.unit || "", qty: v.qty, revenue: v.revenue, cost: v.cost, profit, margin: v.revenue > 0 ? Math.round((profit / v.revenue) * 100) : 0 };
+    return { pid: v.productId, name: p?.name || "—", sku: p?.sku || "", unit: p?.unit || "", qty: v.qty, revenue: v.revenue, cost: v.cost, profit, margin: v.revenue > 0 ? Math.round((profit / v.revenue) * 100) : 0 };
   }).sort((a, b) => b.profit - a.profit);
   const topChart = items.slice(0, 7).map((i) => ({ name: i.sku || i.name.slice(0, 10), profit: i.profit }));
 
@@ -2728,6 +2748,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
           <Calendar size={15} />
           <span className="muted">Periode</span>
           <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
+          {loadingAcc && <span className="muted xs">· memuat…</span>}
         </div>
         <button className="btn" onClick={exportExcel} disabled={exporting}>
           <Download size={16} /> {exporting ? "Menyiapkan…" : "Export ke Excel"}

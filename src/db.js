@@ -131,8 +131,12 @@ export const Expenses = {
 
 /* ============================ SALES LOG ============================ */
 export const Sales = {
-  async list() {
-    const { data, error } = await supabase.from("sales_log").select("*").order("created_at", { ascending: false });
+  // opts.sinceDays: batasi ke N hari terakhir (skala besar); opts.limit: batas baris
+  async list(opts = {}) {
+    let q = supabase.from("sales_log").select("*").order("created_at", { ascending: false });
+    if (opts.sinceDays) q = q.gte("created_at", new Date(Date.now() - opts.sinceDays * 86400000).toISOString());
+    if (opts.limit) q = q.limit(opts.limit);
+    const { data, error } = await q;
     if (error) throw error;
     return data.map((r) => ({
       id: r.id, productId: r.product_id, qty: Number(r.qty), revenue: Number(r.revenue), cost: Number(r.cost),
@@ -146,6 +150,18 @@ export const Sales = {
       txn_id: s.txnId || null, cashier: s.cashier || null, method: s.method || null,
     });
     if (error) throw error;
+  },
+  // Agregat dihitung di server (akurat & ringan walau data besar). from/to = ISO string atau null.
+  async agg(fromISO, toISO) {
+    const { data, error } = await supabase.rpc("sales_agg", { p_from: fromISO ?? null, p_to: toISO ?? null });
+    if (error) throw error;
+    const r = (data && data[0]) || {};
+    return { revenue: Number(r.revenue || 0), cost: Number(r.cost || 0), qty: Number(r.qty || 0), txns: Number(r.txns || 0) };
+  },
+  async byProduct(fromISO, toISO) {
+    const { data, error } = await supabase.rpc("sales_by_product", { p_from: fromISO ?? null, p_to: toISO ?? null });
+    if (error) throw error;
+    return (data || []).map((r) => ({ productId: r.product_id, qty: Number(r.qty), revenue: Number(r.revenue), cost: Number(r.cost) }));
   },
 };
 
