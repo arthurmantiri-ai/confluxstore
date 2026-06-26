@@ -49,6 +49,24 @@ const periodLabel = (ym) => { if (!ym) return "-"; const [y, m] = String(ym).spl
 const thisPeriod = () => new Date().toISOString().slice(0, 7);
 const prevPeriod = (ym) => { const [y, m] = String(ym).split("-").map(Number); const d = new Date(y, (m || 1) - 1, 1); d.setMonth(d.getMonth() - 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
 
+// Simpan sesi kasir (nama + jam mulai shift) di perangkat agar pulih otomatis
+// setelah reload pada HARI yang sama. Beda hari atau beda akun -> shift baru.
+const CASHIER_KEY = "conflux.cashier";
+const saveCashierSession = (name, start, uid) => {
+  try { localStorage.setItem(CASHIER_KEY, JSON.stringify({ name, start, uid: uid || null, day: new Date(start).toDateString() })); } catch (e) {}
+};
+const loadCashierSession = (uid) => {
+  try {
+    const raw = localStorage.getItem(CASHIER_KEY); if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (!o || !o.name || !o.start) return null;
+    if (uid && o.uid && o.uid !== uid) return null;        // akun berbeda
+    if (o.day !== new Date().toDateString()) return null;   // hari berbeda -> mulai shift baru
+    return o;
+  } catch (e) { return null; }
+};
+const clearCashierSession = () => { try { localStorage.removeItem(CASHIER_KEY); } catch (e) {} };
+
 // Siklus order / periode review (hari) — dipakai untuk saran jumlah re-stok
 const REVIEW_DAYS = 7;
 
@@ -752,6 +770,10 @@ export default function App() {
         const r = prof?.role === "manager" ? "manager" : "cashier";
         setProfileRole(r);
         if (r === "manager") { setRole("manager"); setCashierName(prof?.name || "Manajer"); setView("dashboard"); setShiftStart(Date.now()); }
+        else {
+          const saved = loadCashierSession(uid);
+          if (saved) { setRole("cashier"); setCashierName(saved.name); setShiftStart(saved.start); setView("kasir"); }
+        }
       } catch (e) { console.error("[profile]", e); setProfileRole("cashier"); }
       setAuthReady(true);
     };
@@ -791,7 +813,7 @@ export default function App() {
     });
   };
 
-  const logout = () => { if (hasSupabase) Auth.signOut(); setRole(null); setSidebarOpen(false); setShiftReport(null); setCashierName(""); loadedRef.current = false; };
+  const logout = () => { if (hasSupabase) Auth.signOut(); clearCashierSession(); setRole(null); setSidebarOpen(false); setShiftReport(null); setCashierName(""); loadedRef.current = false; };
 
   // Ringkasan shift kasir (anti-kecurangan): transaksi kasir ini sejak login
   const buildShiftReport = () => {
@@ -989,7 +1011,7 @@ export default function App() {
       return (
         <>
           <Style />
-          <RoleGate onEnter={(r, name) => { setRole(r); setView(r === "manager" ? "dashboard" : "kasir"); setCashierName(r === "manager" ? "Manajer" : (name || "Kasir")); setShiftStart(Date.now()); }} pin={store.pin || MANAGER_PIN} />
+          <RoleGate onEnter={(r, name) => { const start = Date.now(); setRole(r); setView(r === "manager" ? "dashboard" : "kasir"); setCashierName(r === "manager" ? "Manajer" : (name || "Kasir")); setShiftStart(start); if (r === "cashier") saveCashierSession(name || "Kasir", start, null); }} pin={store.pin || MANAGER_PIN} />
         </>
       );
     }
@@ -1001,8 +1023,8 @@ export default function App() {
         <>
           <Style />
           <CashierNameGate
-            onEnter={(name) => { setRole("cashier"); setCashierName(name || "Kasir"); setShiftStart(Date.now()); setView("kasir"); }}
-            onBack={() => Auth.signOut()}
+            onEnter={(name) => { const start = Date.now(); setRole("cashier"); setCashierName(name || "Kasir"); setShiftStart(start); setView("kasir"); saveCashierSession(name || "Kasir", start, session?.user?.id); }}
+            onBack={() => { clearCashierSession(); Auth.signOut(); }}
           />
         </>
       );
