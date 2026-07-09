@@ -45,7 +45,7 @@ const invoiceNo = () => {
 
 // Periode bulan (YYYY-MM) -> label ramah; bulan sekarang & bulan sebelumnya
 const ID_MONTHS = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
-const periodLabel = (ym) => { if (!ym) return "-"; const [y, m] = String(ym).split("-").map(Number); return `${ID_MONTHS[(m || 1) - 1]} ${y}`; };
+const periodLabel = (ym) => { if (!ym) return "-"; if (ym === "all") return "Semua waktu"; const [y, m] = String(ym).split("-").map(Number); return `${ID_MONTHS[(m || 1) - 1]} ${y}`; };
 const thisPeriod = () => new Date().toISOString().slice(0, 7);
 const prevPeriod = (ym) => { const [y, m] = String(ym).split("-").map(Number); const d = new Date(y, (m || 1) - 1, 1); d.setMonth(d.getMonth() - 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
 
@@ -311,7 +311,8 @@ const escposReceipt = (store, d) => {
     s += line("Bayar (" + d.methodLabel + ")", rp(d.paid != null ? d.paid : d.total));
     if (d.change != null && d.change >= 0) s += line("Kembalian", rp(d.change));
   } else {
-    s += "-".repeat(W) + "\n** BELUM LUNAS **\n";
+    s += "-".repeat(W) + "\n" + (d.settled ? "** LUNAS **" : "** BELUM LUNAS **") + "\n";
+    if (d.settled && d.paidAt) s += "Dibayar: " + d.paidAt + "\n";
     s += "Pengutang: " + (d.debtor || "-") + "\n";
     if (d.business) s += "Usaha: " + d.business + "\n";
     if (d.phone) s += "Telp: " + d.phone + "\n";
@@ -502,7 +503,8 @@ function Receipt({ store, data }) {
         </>
       ) : (
         <>
-          <div className="r-stamp">** BELUM LUNAS **</div>
+          <div className="r-stamp">{d.settled ? "** LUNAS **" : "** BELUM LUNAS **"}</div>
+          {d.settled && d.paidAt && <div className="r-row r-small"><span>Dibayar</span><span>{d.paidAt}</span></div>}
           <div className="r-row r-small"><span>Pengutang</span><span>{d.debtor || "-"}</span></div>
           {d.business && <div className="r-row r-small"><span>Usaha</span><span>{d.business}</span></div>}
           {d.phone && <div className="r-row r-small"><span>Telp</span><span>{d.phone}</span></div>}
@@ -964,6 +966,7 @@ export default function App() {
   const debtToReceipt = (d) => ({
     kind: "hutang", no: d.id, date: d.date, cashier: cashierName || "Kasir",
     items: d.items, total: d.total, debtor: d.debtor, business: d.business, phone: d.phone,
+    settled: d.status === "lunas", paidAt: d.paidAt || null,
   });
 
   const applySimulation = (rows) => {
@@ -2558,6 +2561,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
   const [form, setForm] = useState(null); // { kind:'capital'|'expense', entry }
   const [del, setDel] = useState(null);
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
+  const isAll = month === "all"; // periode "Semua waktu" (all time)
   const [exporting, setExporting] = useState(false);
 
   const totalModal = capital.reduce((a, c) => a + c.amount, 0);
@@ -2568,9 +2572,16 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
   const [loadingAcc, setLoadingAcc] = useState(hasSupabase);
 
   useEffect(() => {
-    const [yy, mm] = month.split("-").map(Number);
-    const fromISO = new Date(yy, mm - 1, 1).toISOString();
-    const toISO = new Date(yy, mm, 1).toISOString();
+    let fromISO, toISO;
+    if (isAll) {
+      // Semua waktu: pakai rentang sangat lebar agar seluruh riwayat terhitung
+      fromISO = new Date(2000, 0, 1).toISOString();
+      toISO = new Date(Date.now() + 86400000).toISOString();
+    } else {
+      const [yy, mm] = month.split("-").map(Number);
+      fromISO = new Date(yy, mm - 1, 1).toISOString();
+      toISO = new Date(yy, mm, 1).toISOString();
+    }
     if (!hasSupabase) {
       const a = salesLog.reduce((x, s) => ({ revenue: x.revenue + s.revenue, cost: x.cost + s.cost, qty: x.qty + s.qty }), { revenue: 0, cost: 0, qty: 0 });
       const m = {};
@@ -2591,15 +2602,15 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
   const gross = revenue - cogs;
 
   // Biaya operasional periode terpilih + bulan sebelumnya (deteksi kebocoran)
-  const prev = prevPeriod(month);
-  const monthExpenses = expenses.filter((e) => (e.period || "") === month);
-  const prevExpenses = expenses.filter((e) => (e.period || "") === prev);
+  const prev = isAll ? null : prevPeriod(month);
+  const monthExpenses = isAll ? expenses : expenses.filter((e) => (e.period || "") === month);
+  const prevExpenses = isAll ? [] : expenses.filter((e) => (e.period || "") === prev);
   const opex = monthExpenses.reduce((a, e) => a + e.amount, 0);
   const prevOpex = prevExpenses.reduce((a, e) => a + e.amount, 0);
   const net = gross - opex;
   const invValue = products.reduce((a, p) => a + p.cost * p.stock, 0);
   const grossMargin = revenue > 0 ? Math.round((gross / revenue) * 100) : 0;
-  const paybackMonths = net > 0 ? Math.ceil(totalModal / net) : null;
+  const paybackMonths = !isAll && net > 0 ? Math.ceil(totalModal / net) : null; // estimasi memakai laba per bulan
   const roiBulan = totalModal > 0 ? (net / totalModal) * 100 : 0;
 
   // opex per kategori (bulan terpilih)
@@ -2616,6 +2627,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
   const opexRatio = revenue > 0 ? Math.round((opex / revenue) * 100) : 0;
 
   const copyLastMonth = () => {
+    if (isAll) return;
     const have = new Set(monthExpenses.map((e) => (e.name + "|" + e.category).toLowerCase()));
     const src = prevExpenses.filter((e) => !have.has((e.name + "|" + e.category).toLowerCase()));
     if (src.length === 0) { flash && flash(`Tidak ada biaya baru untuk disalin dari ${periodLabel(prev)}`); return; }
@@ -2652,7 +2664,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
   const topChart = items.slice(0, 7).map((i) => ({ name: i.sku || i.name.slice(0, 10), profit: i.profit }));
 
   const MONTHS_ID = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
-  const monthLabel = (ym) => { const [y, m] = ym.split("-").map(Number); return `${MONTHS_ID[(m || 1) - 1]} ${y}`; };
+  const monthLabel = (ym) => { if (ym === "all") return "Semua Waktu"; const [y, m] = ym.split("-").map(Number); return `${MONTHS_ID[(m || 1) - 1]} ${y}`; };
 
   const exportExcel = async () => {
     setExporting(true);
@@ -2803,7 +2815,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
       const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url; a.download = `Akuntansi-Conflux-${month}.xlsx`;
+      a.href = url; a.download = `Akuntansi-Conflux-${month === "all" ? "semua-waktu" : month}.xlsx`;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1500);
       flash && flash(`Laporan Excel ${period} diunduh`);
@@ -2821,7 +2833,11 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
         <div className="acc-period">
           <Calendar size={15} />
           <span className="muted">Periode</span>
-          <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
+          {!isAll && <input type="month" value={month} onChange={(e) => e.target.value && setMonth(e.target.value)} />}
+          <button type="button" className={`acc-all ${isAll ? "on" : ""}`}
+            onClick={() => setMonth(isAll ? thisPeriod() : "all")}>
+            Semua waktu
+          </button>
           {loadingAcc && <span className="muted xs">· memuat…</span>}
         </div>
         <button className="btn" onClick={exportExcel} disabled={exporting}>
@@ -2831,17 +2847,17 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
 
       <div className="acc-grid">
         <Stat icon={Hammer} label="Modal tertanam" value={rp(totalModal)} sub="pembangunan & investasi" />
-        <Stat icon={ArrowUpRight} accent label="Pendapatan (bln)" value={rp(revenue)} sub={`${num(items.reduce((a, i) => a + i.qty, 0))} unit terjual`} />
+        <Stat icon={ArrowUpRight} accent label={isAll ? "Pendapatan (total)" : "Pendapatan (bln)"} value={rp(revenue)} sub={`${num(items.reduce((a, i) => a + i.qty, 0))} unit terjual`} />
         <Stat icon={Package} label="HPP (modal barang)" value={rp(cogs)} sub="cost of goods sold" />
         <Stat icon={TrendingUp} label="Laba kotor" value={rp(gross)} sub={`margin ${grossMargin}%`} />
-        <Stat icon={Coins} label="Biaya operasional" value={rp(opex)} sub="per bulan" />
-        <Stat icon={Wallet} label="Laba bersih (bln)" value={rp(net)}
+        <Stat icon={Coins} label="Biaya operasional" value={rp(opex)} sub={isAll ? "semua waktu" : "per bulan"} />
+        <Stat icon={Wallet} label={isAll ? "Laba bersih (total)" : "Laba bersih (bln)"} value={rp(net)}
           sub={<span className={net >= 0 ? "up" : "down"}>{net >= 0 ? "untung" : "rugi"}</span>} />
       </div>
 
       <div className="grid-2-1">
         <section className="card">
-          <div className="card-head"><h2>Laporan Laba Rugi</h2><span className="muted">per bulan (estimasi)</span></div>
+          <div className="card-head"><h2>Laporan Laba Rugi</h2><span className="muted">{isAll ? "semua waktu" : "per bulan (estimasi)"}</span></div>
           <div className="pl">
             <div className="pl-row"><span>Pendapatan penjualan</span><b>{rp(revenue)}</b></div>
             <div className="pl-row sub"><span>− HPP (modal barang terjual)</span><span>{rp(cogs)}</span></div>
@@ -2861,11 +2877,11 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
           <div className="card-head"><h2>Balik modal</h2></div>
           <div className="payback">
             <div className="pay-big">{paybackMonths ? `± ${num(paybackMonths)} bln` : "—"}</div>
-            <div className="muted xs">estimasi waktu balik modal dengan laba saat ini</div>
+            <div className="muted xs">{isAll ? "pilih periode bulanan untuk estimasi balik modal" : "estimasi waktu balik modal dengan laba saat ini"}</div>
             <div className="payback-bar"><div style={{ width: `${Math.min(100, Math.max(0, roiBulan))}%` }} /></div>
             <div className="payback-meta">
               <div><span className="muted xs">Total modal</span><b>{rp(totalModal)}</b></div>
-              <div><span className="muted xs">ROI / bulan</span><b>{roiBulan.toFixed(1)}%</b></div>
+              <div><span className="muted xs">{isAll ? "ROI total" : "ROI / bulan"}</span><b>{roiBulan.toFixed(1)}%</b></div>
               <div><span className="muted xs">Nilai stok kini</span><b>{rp(invValue)}</b></div>
             </div>
           </div>
@@ -2925,7 +2941,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
           <div className="trend-legend">
             <span><i className="dot teal" /> Pendapatan</span>
             <span><i className="dot coral" /> Biaya operasional</span>
-            <span className="muted xs">Laba {periodLabel(month)}: <b style={{ color: net >= 0 ? "var(--ok)" : "var(--crit)" }}>{rp(net)}</b></span>
+            <span className="muted xs">Laba {isAll ? "total" : periodLabel(month)}: <b style={{ color: net >= 0 ? "var(--ok)" : "var(--crit)" }}>{rp(net)}</b></span>
           </div>
         </section>
 
@@ -2939,6 +2955,9 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
             <div className="muted xs" style={{ textAlign: "right" }}>{periodLabel(month)}<br />makin tinggi makin perlu dicek</div>
           </div>
           <div className="leak-list">
+            {isAll ? (
+              <div className="empty">Perbandingan antar bulan hanya tersedia pada periode bulanan.</div>
+            ) : (<>
             <div className="leak-head"><span>Kategori</span><span className="r">{periodLabel(prev)}</span><span className="r">{periodLabel(month)}</span><span className="r">Selisih</span></div>
             {catCompare.length === 0 && <div className="empty">Belum ada biaya pada periode ini.</div>}
             {catCompare.map((c) => (
@@ -2951,6 +2970,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
                 </span>
               </div>
             ))}
+            </>)}
           </div>
         </section>
       </div>
@@ -2983,7 +3003,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
           <div className="card-head" style={{ padding: "18px 18px 0", flexWrap: "wrap", gap: 8 }}>
             <h2>Biaya Operasional · {periodLabel(month)}</h2>
             <div className="row-actions">
-              <button className="btn ghost sm" onClick={copyLastMonth}><RefreshCcw size={14} /> Salin {periodLabel(prev)}</button>
+              {!isAll && <button className="btn ghost sm" onClick={copyLastMonth}><RefreshCcw size={14} /> Salin {periodLabel(prev)}</button>}
               <button className="btn sm" onClick={() => setForm({ kind: "expense", entry: null })}><Plus size={14} /> Tambah</button>
             </div>
           </div>
@@ -2995,7 +3015,10 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
                   <td>
                     <div className="strong">{e.name}</div>
                     {(e.items && e.items.length > 0)
-                      ? <div className="exp-items">{e.items.map((it, i) => <span key={i} className="exp-item">{it.label} · {rp(it.amount)}</span>)}</div>
+                      ? <>
+                          {isAll && <div className="muted xs">{e.period ? periodLabel(e.period) : e.date}</div>}
+                          <div className="exp-items">{e.items.map((it, i) => <span key={i} className="exp-item">{it.label} · {rp(it.amount)}</span>)}</div>
+                        </>
                       : <div className="muted xs">{e.period ? periodLabel(e.period) : e.date}</div>}
                   </td>
                   <td><span className="cat-tag">{e.category}</span></td>
@@ -3006,7 +3029,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
                   </div></td>
                 </tr>
               ))}
-              {monthExpenses.length === 0 && <tr><td colSpan={4} className="empty">Belum ada biaya untuk {periodLabel(month)}. Klik “Salin {periodLabel(prev)}” atau “Tambah”.</td></tr>}
+              {monthExpenses.length === 0 && <tr><td colSpan={4} className="empty">{isAll ? "Belum ada biaya tercatat." : <>Belum ada biaya untuk {periodLabel(month)}. Klik “Salin {periodLabel(prev)}” atau “Tambah”.</>}</td></tr>}
             </tbody>
             <tfoot><tr><td className="strong" colSpan={2}>Total operasional</td><td className="r tab strong">{rp(opex)}</td><td /></tr></tfoot>
           </table>
@@ -3015,7 +3038,7 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
 
       {form && (
         <EntryForm
-          kind={form.kind} entry={form.entry} defaultPeriod={month}
+          kind={form.kind} entry={form.entry} defaultPeriod={isAll ? thisPeriod() : month}
           onClose={() => setForm(null)}
           onSave={(data) => {
             if (form.kind === "capital") form.entry ? onUpdateCapital(form.entry.id, data) : onAddCapital(data);
@@ -3244,7 +3267,7 @@ function Style() {
       .pl-sec{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-faint);margin-top:8px;padding-bottom:2px}
       .pl-row.grand{border-top:2px solid var(--line);margin-top:4px;font-weight:700;font-size:15px}
       .pl-row.grand.pos b{color:var(--ok)} .pl-row.grand.neg b{color:var(--crit)}
-      .pl-net{display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding:12px 14px;border-radius:11px;font-weight:700;font-size:15px}
+      .pl-net{display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding:12px 14px;border-radius:11px;font-weight:700;font-size:15px;flex:0 0 auto}
       .pl-net b{font-family:'Space Grotesk';font-size:17px}
       .pl-net.pos{background:var(--ok-bg);color:var(--ok)}
       .pl-net.neg{background:var(--crit-bg);color:var(--crit)}
@@ -3252,6 +3275,9 @@ function Style() {
       .acc-period{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:7px 12px;color:var(--ink-soft)}
       .acc-period input{border:none;background:none;color:var(--ink);font:inherit;font-size:13.5px;outline:none}
       .acc-period input::-webkit-calendar-picker-indicator{filter:invert(.8)}
+      .acc-all{border:1px solid var(--line);background:transparent;color:var(--ink-soft);font:inherit;font-size:12.5px;font-weight:600;padding:5px 11px;border-radius:8px;cursor:pointer;transition:all .15s var(--ease)}
+      .acc-all:hover{border-color:var(--ink-faint);color:var(--ink)}
+      .acc-all.on{background:var(--accent-soft);border-color:transparent;color:var(--accent)}
       .payback{display:flex;flex-direction:column;gap:8px;align-items:flex-start}
       .pay-big{font-family:'Space Grotesk';font-size:30px;font-weight:700;color:var(--accent);letter-spacing:-.02em}
       .payback-bar{width:100%;height:8px;border-radius:6px;background:var(--surface-2);overflow:hidden;margin-top:4px}
