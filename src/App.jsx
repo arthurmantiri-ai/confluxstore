@@ -995,10 +995,20 @@ export default function App() {
     () => products.filter((p) => stockStatus(p) !== "ok"),
     [products]
   );
-  const inventoryValue = useMemo(
+  // Nilai inventory: dari harga batch FIFO (server) agar sinkron dengan Akuntansi;
+  // fallback: stok × modal terbaru (mode lokal / sebelum data termuat)
+  const localInvValue = useMemo(
     () => products.reduce((a, p) => a + p.cost * p.stock, 0),
     [products]
   );
+  const [inventoryValue, setInventoryValue] = useState(0);
+  useEffect(() => {
+    setInventoryValue(localInvValue);
+    if (!hasSupabase) return;
+    let alive = true;
+    Products.inventoryValue().then((v) => { if (alive) setInventoryValue(v); }).catch(() => {});
+    return () => { alive = false; };
+  }, [localInvValue]);
   const newOrders = orders.filter((o) => o.status === "baru").length;
   const unpaidDebts = debts.filter((d) => d.status === "belum").length;
 
