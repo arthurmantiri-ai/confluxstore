@@ -52,9 +52,50 @@ export const Products = {
     const { error } = await supabase.rpc("adjust_stock", { p_id: id, p_delta: delta });
     if (error) throw error;
   },
+  // ===== FIFO: setiap penambahan stok = batch dengan harga belinya sendiri =====
+  async restockFifo(id, qty, cost, note) {
+    const { error } = await supabase.rpc("fifo_restock", { p_id: id, p_qty: qty, p_cost: cost, p_note: note ?? null });
+    if (error) throw error;
+  },
+  // Keluarkan stok FIFO; mengembalikan total HPP dari batch yang terpakai
+  async consumeFifo(id, qty) {
+    const { data, error } = await supabase.rpc("fifo_consume", { p_id: id, p_qty: qty });
+    if (error) throw error;
+    return Number(data || 0);
+  },
+  // Nilai stok kini berdasarkan harga batch (fallback ke harga modal produk)
+  async inventoryValue() {
+    const { data, error } = await supabase.rpc("inventory_value");
+    if (error) throw error;
+    return Number(data || 0);
+  },
+  // Update data barang TANPA menyentuh kolom stok (stok dikelola RPC FIFO)
+  async updateInfo(id, p) {
+    const row = productToRow(p);
+    delete row.stock;
+    const { data, error } = await supabase.from("products").update(row).eq("id", id).select().single();
+    if (error) throw error;
+    return rowToProduct(data);
+  },
   async remove(id) {
     const { error } = await supabase.from("products").delete().eq("id", id);
     if (error) throw error;
+  },
+};
+
+/* ============================ STOCK BATCHES (FIFO) ============================ */
+export const Batches = {
+  // Batch aktif (sisa > 0) sebuah produk, urut dari yang paling lama (urutan FIFO)
+  async list(productId) {
+    const { data, error } = await supabase
+      .from("stock_batches").select("*")
+      .eq("product_id", productId).gt("qty_left", 0)
+      .order("created_at");
+    if (error) throw error;
+    return data.map((r) => ({
+      id: r.id, qtyIn: Number(r.qty_in), qtyLeft: Number(r.qty_left),
+      unitCost: Number(r.unit_cost), note: r.note, at: r.created_at,
+    }));
   },
 };
 

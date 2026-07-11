@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { hasSupabase } from "./supabaseClient";
-import { Products, Movements, Orders as OrdersApi, Debts as DebtsApi, Capital, Expenses, Sales, Settings as SettingsApi, Auth, Profiles } from "./db";
+import { Products, Batches, Movements, Orders as OrdersApi, Debts as DebtsApi, Capital, Expenses, Sales, Settings as SettingsApi, Auth, Profiles } from "./db";
 import {
   LayoutDashboard, Package, ShoppingCart, Globe, RefreshCcw,
   Plus, Minus, Search, X, Check, TrendingUp, ArrowUpRight, ArrowDownRight,
@@ -791,27 +791,40 @@ export default function App() {
     loadAll();
   }, [session]);
 
-  const recordMovement = (productId, type, qty, note) => {
+  const recordMovement = (productId, type, qty, note, unitCost) => {
     const prev = products.find((p) => p.id === productId);
     const newStock = prev ? Math.max(0, prev.stock + (type === "in" ? qty : -qty)) : 0;
-    setProducts((ps) => ps.map((p) => (p.id === productId ? { ...p, stock: newStock } : p)));
+    // Stok masuk = batch FIFO baru dengan harga belinya sendiri; tanpa input harga, pakai modal terakhir
+    const costIn = type === "in" ? (unitCost != null && unitCost !== "" ? Number(unitCost) : (prev?.cost || 0)) : null;
+    setProducts((ps) => ps.map((p) => (p.id === productId ? { ...p, stock: newStock, ...(type === "in" ? { cost: costIn } : {}) } : p)));
     setMovements((m) => [{ id: uid(), productId, type, qty, note, at: "Baru saja" }, ...m]);
     persist(() => Movements.create({ productId, type, qty, note }));
-    persist(() => Products.adjustStock(productId, type === "in" ? qty : -qty));
+    persist(() => (type === "in" ? Products.restockFifo(productId, qty, costIn, note) : Products.consumeFifo(productId, qty)));
   };
 
-  // Pemotongan/penambahan stok BANYAK baris sekaligus (aman jika produk sama muncul >1 kali)
-  const applyStockDeltas = (deltas) => {
+  // Penjualan (kasir & order): potong stok FIFO + catat HPP sesuai batch yang benar-benar terpakai.
+  // Aman jika produk yang sama muncul lebih dari satu baris.
+  const sellItems = (items, note, ctx = {}) => {
     const newStock = {};
-    deltas.forEach((d) => {
-      const base = newStock[d.productId] != null ? newStock[d.productId] : (products.find((p) => p.id === d.productId)?.stock ?? 0);
-      newStock[d.productId] = Math.max(0, base + (d.type === "in" ? d.qty : -d.qty));
+    items.forEach((it) => {
+      const base = newStock[it.pid] != null ? newStock[it.pid] : (products.find((p) => p.id === it.pid)?.stock ?? 0);
+      newStock[it.pid] = Math.max(0, base - it.qty);
     });
     setProducts((ps) => ps.map((p) => (newStock[p.id] != null ? { ...p, stock: newStock[p.id] } : p)));
-    setMovements((m) => [...deltas.map((d) => ({ id: uid(), productId: d.productId, type: d.type, qty: d.qty, note: d.note, at: "Baru saja" })), ...m]);
-    deltas.forEach((d) => {
-      persist(() => Movements.create({ productId: d.productId, type: d.type, qty: d.qty, note: d.note }));
-      persist(() => Products.adjustStock(d.productId, d.type === "in" ? d.qty : -d.qty));
+    setMovements((m) => [...items.map((it) => ({ id: uid(), productId: it.pid, type: "out", qty: it.qty, note, at: "Baru saja" })), ...m]);
+    items.forEach((it) => {
+      const p = products.find((x) => x.id === it.pid);
+      const est = (p?.cost || 0) * it.qty; // perkiraan lokal; server menghitung HPP FIFO yang sebenarnya
+      const rec = {
+        productId: it.pid, qty: it.qty, revenue: it.revenue, date: "Hari ini",
+        ts: Date.now(), txnId: ctx.txnId || null, cashier: ctx.cashier || null, method: ctx.method || null,
+      };
+      setSalesLog((sl) => [{ id: uid(), ...rec, cost: est }, ...sl]);
+      persist(() => Movements.create({ productId: it.pid, type: "out", qty: it.qty, note }));
+      persist(async () => {
+        const cost = await Products.consumeFifo(it.pid, it.qty); // HPP FIFO dari server
+        await Sales.create({ ...rec, cost });
+      });
     });
   };
 
@@ -834,10 +847,16 @@ export default function App() {
 
   const addProduct = async (data) => {
     const code = nextCode(products);
+    const initialStock = Number(data.stock) || 0;
     if (hasSupabase) {
       try {
-        const row = await Products.create({ code, ...data });
-        setProducts((ps) => [row, ...ps]);
+        // Buat produk tanpa stok, lalu stok awal dicatat sebagai batch FIFO pertama
+        const row = await Products.create({ code, ...data, stock: 0 });
+        if (initialStock > 0) {
+          await Products.restockFifo(row.id, initialStock, Number(data.cost) || 0, "Stok awal");
+          await Movements.create({ productId: row.id, type: "in", qty: initialStock, note: "Stok awal" });
+        }
+        setProducts((ps) => [{ ...row, stock: initialStock }, ...ps]);
         flash(`Barang ${code} ditambahkan`);
         return;
       } catch (e) { console.error("[sync]", e); flash("Gagal simpan ke server"); }
@@ -848,7 +867,7 @@ export default function App() {
 
   const updateProduct = (id, data) => {
     const prev = products.find((p) => p.id === id);
-    // Catat penyesuaian ke log jika jumlah stok berubah lewat edit
+    // Catat penyesuaian ke log & sinkronkan ke batch FIFO jika jumlah stok berubah lewat edit
     if (prev && data.stock !== prev.stock) {
       const diff = data.stock - prev.stock;
       setMovements((m) => [
@@ -856,10 +875,14 @@ export default function App() {
         ...m,
       ]);
       persist(() => Movements.create({ productId: id, type: diff > 0 ? "in" : "out", qty: Math.abs(diff), note: "Penyesuaian (edit barang)" }));
+      persist(() => (diff > 0
+        ? Products.restockFifo(id, diff, Number(data.cost) || prev.cost || 0, "Penyesuaian (edit barang)")
+        : Products.consumeFifo(id, Math.abs(diff))));
     }
     const merged = { ...prev, ...data };
     setProducts((ps) => ps.map((p) => (p.id === id ? merged : p)));
-    persist(() => Products.update(id, merged));
+    // Kolom stok TIDAK ditulis langsung — sepenuhnya dikelola RPC FIFO di atas
+    persist(() => Products.updateInfo(id, merged));
     flash("Barang diperbarui");
   };
 
@@ -880,15 +903,6 @@ export default function App() {
   };
 
   // ===== Akuntansi =====
-  const recordSale = (pid, qty, revenue, ctx = {}) => {
-    const p = products.find((x) => x.id === pid);
-    const rec = {
-      productId: pid, qty, revenue, cost: (p?.cost || 0) * qty, date: "Hari ini",
-      ts: Date.now(), txnId: ctx.txnId || null, cashier: ctx.cashier || null, method: ctx.method || null,
-    };
-    setSalesLog((sl) => [{ id: uid(), ...rec }, ...sl]);
-    persist(() => Sales.create(rec));
-  };
   const addCapital = async (e) => {
     if (hasSupabase) { try { const row = await Capital.create(e); setCapital((c) => [{ id: row.id, ...e }, ...c]); return; } catch (err) { console.error("[sync]", err); } }
     setCapital((c) => [{ id: uid(), ...e }, ...c]);
@@ -1108,7 +1122,7 @@ export default function App() {
           )}
           {view === "stok" && (
             <Inventory products={products} movements={movements} pById={pById}
-              onMove={(pid, type, qty, note) => { recordMovement(pid, type, qty, note); flash(`Stok ${type === "in" ? "masuk" : "keluar"} dicatat`); }}
+              onMove={(pid, type, qty, note, cost) => { recordMovement(pid, type, qty, note, cost); flash(`Stok ${type === "in" ? "masuk" : "keluar"} dicatat`); }}
               onAdd={addProduct} onUpdate={updateProduct} onDelete={deleteProduct}
             />
           )}
@@ -1116,8 +1130,11 @@ export default function App() {
             <Kasir products={products}
               onCheckout={(lines, total, method, meta) => {
                 const txnId = uid();
-                applyStockDeltas(lines.map((l) => ({ productId: l.pid, type: "out", qty: l.qty, note: `Penjualan kasir (${PAY_LABEL[method]})` })));
-                (meta.items || []).forEach((it) => recordSale(it.pid, it.qty, it.lineTotal, { txnId, cashier: cashierName || "Kasir", method }));
+                sellItems(
+                  (meta.items || []).map((it) => ({ pid: it.pid, qty: it.qty, revenue: it.lineTotal })),
+                  `Penjualan kasir (${PAY_LABEL[method]})`,
+                  { txnId, cashier: cashierName || "Kasir", method }
+                );
                 if (method === "hutang") { addDebt(meta, total); flash(`Hutang ${rp(total)} dicatat — ${meta?.debtor || "Pelanggan"}`); }
                 else flash(`Pembayaran ${rp(total)} via ${PAY_LABEL[method]} berhasil`);
                 setPrintReceipt(buildSaleReceipt(total, method, meta));
@@ -1131,8 +1148,11 @@ export default function App() {
               onCreate={createOrder}
               onAccept={(o) => {
                 const txnId = uid();
-                applyStockDeltas(o.items.map((it) => ({ productId: it.pid, type: "out", qty: it.qty, note: `Order ${o.id}` })));
-                o.items.forEach((it) => { const p = pById(it.pid); if (p) recordSale(it.pid, it.qty, p.price * it.qty, { txnId, cashier: "Order Online", method: "order" }); });
+                sellItems(
+                  o.items.map((it) => { const p = pById(it.pid); return { pid: it.pid, qty: it.qty, revenue: (p?.price || 0) * it.qty }; }),
+                  `Order ${o.id}`,
+                  { txnId, cashier: "Order Online", method: "order" }
+                );
                 flash(`${o.id} diterima & stok dipotong`);
               }}
               flash={flash}
@@ -1140,7 +1160,7 @@ export default function App() {
           )}
           {view === "restok" && (
             <Restock products={products}
-              onReceive={(p, qty) => { recordMovement(p.id, "in", qty, "Penerimaan re-stok"); flash(`${qty} ${p.name} masuk stok`); }}
+              onReceive={(p, qty, cost) => { recordMovement(p.id, "in", qty, "Penerimaan re-stok", cost); flash(`${qty} ${p.name} masuk stok`); }}
             />
           )}
           {view === "hutang" && (
@@ -1501,8 +1521,21 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
   const [moveType, setMoveType] = useState("in");
   const [qty, setQty] = useState(1);
   const [note, setNote] = useState("");
+  const [buyCost, setBuyCost] = useState(0); // harga beli / satuan untuk stok masuk (batch FIFO)
+  const [batches, setBatches] = useState(null); // batch aktif produk pada modal
   const [formFor, setFormFor] = useState(null); // {} = tambah, product = edit
   const [delFor, setDelFor] = useState(null);
+
+  // Muat batch aktif (FIFO) produk yang sedang dibuka di modal
+  useEffect(() => {
+    if (!moveFor || !hasSupabase) { setBatches(null); return; }
+    let alive = true;
+    setBatches(null);
+    Batches.list(moveFor.id)
+      .then((b) => { if (alive) setBatches(b); })
+      .catch(() => { if (alive) setBatches([]); });
+    return () => { alive = false; };
+  }, [moveFor]);
 
   const cats = ["all", ...Array.from(new Set(products.map((p) => p.category)))];
   const list = products.filter((p) => {
@@ -1511,8 +1544,8 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
     return okQ && okF;
   });
 
-  const openMove = (p, type) => { setMoveFor(p); setMoveType(type); setQty(1); setNote(type === "in" ? "Pembelian supplier" : "Penyesuaian"); };
-  const submitMove = () => { onMove(moveFor.id, moveType, Number(qty) || 0, note); setMoveFor(null); };
+  const openMove = (p, type) => { setMoveFor(p); setMoveType(type); setQty(1); setBuyCost(p.cost || 0); setNote(type === "in" ? "Pembelian supplier" : "Penyesuaian"); };
+  const submitMove = () => { onMove(moveFor.id, moveType, Number(qty) || 0, note, moveType === "in" ? (Number(buyCost) || 0) : undefined); setMoveFor(null); };
 
   return (
     <div className="stack">
@@ -1601,10 +1634,31 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
                 <button onClick={() => setQty((v) => Number(v) + 1)}><Plus size={16} /></button>
               </div>
             </label>
+            {moveType === "in" && (
+              <label className="fld">
+                <span>Harga beli / {moveFor.unit || "satuan"} (Rp)</span>
+                <input type="number" value={buyCost} onChange={(e) => setBuyCost(e.target.value)} />
+                <span className="hint">Dicatat sebagai batch FIFO baru. Harga modal terakhir: {rp(moveFor.cost)}</span>
+              </label>
+            )}
             <label className="fld">
               <span>Catatan</span>
               <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Keterangan…" />
             </label>
+            {hasSupabase && (
+              <div className="batch-box">
+                <div className="batch-title">Batch aktif · keluar dari yang paling lama (FIFO)</div>
+                {batches == null && <div className="muted xs">Memuat batch…</div>}
+                {batches != null && batches.length === 0 && <div className="muted xs">Belum ada batch aktif.</div>}
+                {batches != null && batches.map((b) => (
+                  <div key={b.id} className="batch-row">
+                    <span className="muted xs">{new Date(b.at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })}</span>
+                    <span className="tab">{num(b.qtyLeft)} {moveFor.unit}</span>
+                    <span className="tab">@ {rp(b.unitCost)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </Modal>
@@ -1733,6 +1787,7 @@ function ProductForm({ product, products, categories, onClose, onSave }) {
           <label className="fld">
             <span>Harga modal / satuan (Rp)</span>
             <input type="number" value={f.cost} onChange={(e) => n("cost", e.target.value)} />
+            {product && <span className="hint">Referensi modal terbaru. HPP penjualan mengikuti harga batch FIFO masing-masing.</span>}
           </label>
         </div>
 
@@ -1789,7 +1844,7 @@ function ProductForm({ product, products, categories, onClose, onSave }) {
         <label className="fld">
           <span>Jumlah stok ({f.unit || "satuan"})</span>
           <input type="number" value={f.stock} onChange={(e) => n("stock", e.target.value)} />
-          {product && <span className="hint">Mengubah jumlah akan tercatat sebagai penyesuaian di log stok.</span>}
+          {product && <span className="hint">Perubahan di sini tercatat sebagai penyesuaian & disinkronkan ke batch FIFO. Untuk pembelian baru, gunakan tombol “Masuk” agar harga beli tercatat per batch.</span>}
         </label>
 
         <div className="form-section">Parameter perhitungan ROP</div>
@@ -2316,6 +2371,8 @@ function Restock({ products, onReceive }) {
   const need = products.filter((p) => stockStatus(p) !== "ok")
     .sort((a, b) => (stockStatus(a) === "crit" ? -1 : 1) - (stockStatus(b) === "crit" ? -1 : 1));
   const [open, setOpen] = useState(null);
+  const [costs, setCosts] = useState({}); // harga beli / satuan per produk (batch FIFO)
+  const costOf = (p) => (costs[p.id] != null ? costs[p.id] : (p.cost || 0));
 
   return (
     <div className="stack">
@@ -2375,10 +2432,15 @@ function Restock({ products, onReceive }) {
               </div>
 
               <div className="restock-action">
-                <button className="btn full" onClick={() => onReceive(p, s)}>
+                <label className="fld">
+                  <span>Harga beli / {p.unit} (Rp)</span>
+                  <input type="number" value={costOf(p)} onChange={(e) => setCosts((c) => ({ ...c, [p.id]: e.target.value }))} />
+                  <span className="hint">Harga modal terakhir: {rp(p.cost)}</span>
+                </label>
+                <button className="btn full" onClick={() => onReceive(p, s, Number(costOf(p)) || 0)}>
                   <Truck size={15} /> Terima {num(s)} unit
                 </button>
-                <span className="muted xs center">Simulasi barang datang dari supplier</span>
+                <span className="muted xs center">Dicatat sebagai batch FIFO baru</span>
               </div>
             </div>
           );
@@ -2608,7 +2670,16 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
   const opex = monthExpenses.reduce((a, e) => a + e.amount, 0);
   const prevOpex = prevExpenses.reduce((a, e) => a + e.amount, 0);
   const net = gross - opex;
-  const invValue = products.reduce((a, p) => a + p.cost * p.stock, 0);
+  // Nilai stok kini: dari harga batch FIFO (server); fallback stok × modal terbaru
+  const [invValue, setInvValue] = useState(() => products.reduce((a, p) => a + p.cost * p.stock, 0));
+  useEffect(() => {
+    const local = products.reduce((a, p) => a + p.cost * p.stock, 0);
+    setInvValue(local);
+    if (!hasSupabase) return;
+    let alive = true;
+    Products.inventoryValue().then((v) => { if (alive) setInvValue(v); }).catch(() => {});
+    return () => { alive = false; };
+  }, [products]);
   const grossMargin = revenue > 0 ? Math.round((gross / revenue) * 100) : 0;
   const paybackMonths = !isAll && net > 0 ? Math.ceil(totalModal / net) : null; // estimasi memakai laba per bulan
   const roiBulan = totalModal > 0 ? (net / totalModal) * 100 : 0;
@@ -3275,6 +3346,10 @@ function Style() {
       .acc-period{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:7px 12px;color:var(--ink-soft)}
       .acc-period input{border:none;background:none;color:var(--ink);font:inherit;font-size:13.5px;outline:none}
       .acc-period input::-webkit-calendar-picker-indicator{filter:invert(.8)}
+      .batch-box{border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+      .batch-title{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-faint)}
+      .batch-row{display:flex;align-items:center;gap:10px;font-size:12.5px}
+      .batch-row span:first-child{flex:1}
       .acc-all{border:1px solid var(--line);background:transparent;color:var(--ink-soft);font:inherit;font-size:12.5px;font-weight:600;padding:5px 11px;border-radius:8px;cursor:pointer;transition:all .15s var(--ease)}
       .acc-all:hover{border-color:var(--ink-faint);color:var(--ink)}
       .acc-all.on{background:var(--accent-soft);border-color:transparent;color:var(--accent)}
