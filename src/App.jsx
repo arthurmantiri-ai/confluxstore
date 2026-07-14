@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { hasSupabase } from "./supabaseClient";
-import { Products, Batches, Movements, Orders as OrdersApi, Debts as DebtsApi, Capital, Expenses, Sales, Settings as SettingsApi, Auth, Profiles } from "./db";
+import { Products, Batches, Movements, Orders as OrdersApi, Debts as DebtsApi, Capital, Expenses, Sales, Consign, Settings as SettingsApi, Auth, Profiles } from "./db";
 import {
   LayoutDashboard, Package, ShoppingCart, Globe, RefreshCcw,
   Plus, Minus, Search, X, Check, TrendingUp, ArrowUpRight, ArrowDownRight,
@@ -10,7 +10,7 @@ import {
   Lock, Unlock, ShieldCheck, Calculator, ArrowRight,
   Phone, Building2, User, CheckCircle2, Printer, Settings, LogOut,
   LineChart, BarChart3, Coins, Hammer, Download, Calendar,
-  Bean, Droplets, CupSoda, Coffee, LayoutGrid, History, Bluetooth
+  Bean, Droplets, CupSoda, Coffee, LayoutGrid, History, Bluetooth, Handshake
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -245,9 +245,10 @@ const NAV = [
   { key: "order", label: "Order Online", icon: Globe, roles: ["cashier", "manager"] },
   { key: "hutang", label: "Hutang", icon: ClipboardList, roles: ["cashier", "manager"] },
   { key: "restok", label: "Re-stok", icon: RefreshCcw, roles: ["manager"] },
+  { key: "titipjual", label: "Titip Jual", icon: Handshake, roles: ["manager"] },
   { key: "simulasi", label: "Simulasi Stok", icon: Calculator, roles: ["manager"] },
   { key: "akuntansi", label: "Akuntansi", icon: LineChart, roles: ["manager"] },
-  { key: "riwayat", label: "Riwayat Penjualan", icon: History, roles: ["manager"] },
+  { key: "riwayat", label: "Riwayat Penjualan", icon: History, roles: ["cashier", "manager"] },
 ];
 
 const PAY_METHODS = [
@@ -300,6 +301,7 @@ const escposReceipt = (store, d) => {
   s += "-".repeat(W) + "\n";
   s += ESC + "a" + "\x00"; // left
   s += (d.kind === "hutang" ? "NOTA HUTANG" : "NOTA PEMBAYARAN") + "\n";
+  if (d.reprint) s += "-- CETAK ULANG --\n";
   s += "No : " + d.no + "\n";
   s += "Tgl: " + d.date + "\n";
   s += "Kasir: " + d.cashier + "\n";
@@ -311,9 +313,9 @@ const escposReceipt = (store, d) => {
     s += line("Bayar (" + d.methodLabel + ")", rp(d.paid != null ? d.paid : d.total));
     if (d.change != null && d.change >= 0) s += line("Kembalian", rp(d.change));
   } else {
-    s += "-".repeat(W) + "\n" + (d.settled ? "** LUNAS **" : "** BELUM LUNAS **") + "\n";
+    if (d.settled != null) s += "-".repeat(W) + "\n" + (d.settled ? "** LUNAS **" : "** BELUM LUNAS **") + "\n";
     if (d.settled && d.paidAt) s += "Dibayar: " + d.paidAt + "\n";
-    s += "Pengutang: " + (d.debtor || "-") + "\n";
+    if (d.debtor) s += "Pengutang: " + d.debtor + "\n";
     if (d.business) s += "Usaha: " + d.business + "\n";
     if (d.phone) s += "Telp: " + d.phone + "\n";
   }
@@ -482,6 +484,7 @@ function Receipt({ store, data }) {
       {store.phone && <div className="r-center r-small">{store.phone}</div>}
       <div className="r-dash" />
       <div className="r-center r-title">{d.kind === "hutang" ? "NOTA HUTANG" : "NOTA PEMBAYARAN"}</div>
+      {d.reprint && <div className="r-center r-small">— CETAK ULANG —</div>}
       <div className="r-meta">
         <div className="r-row r-small"><span>No</span><span>{d.no}</span></div>
         <div className="r-row r-small"><span>Tanggal</span><span>{d.date}</span></div>
@@ -503,9 +506,9 @@ function Receipt({ store, data }) {
         </>
       ) : (
         <>
-          <div className="r-stamp">{d.settled ? "** LUNAS **" : "** BELUM LUNAS **"}</div>
+          {d.settled != null && <div className="r-stamp">{d.settled ? "** LUNAS **" : "** BELUM LUNAS **"}</div>}
           {d.settled && d.paidAt && <div className="r-row r-small"><span>Dibayar</span><span>{d.paidAt}</span></div>}
-          <div className="r-row r-small"><span>Pengutang</span><span>{d.debtor || "-"}</span></div>
+          {d.debtor && <div className="r-row r-small"><span>Pengutang</span><span>{d.debtor}</span></div>}
           {d.business && <div className="r-row r-small"><span>Usaha</span><span>{d.business}</span></div>}
           {d.phone && <div className="r-row r-small"><span>Telp</span><span>{d.phone}</span></div>}
         </>
@@ -710,6 +713,7 @@ export default function App() {
   const [capital, setCapital] = useState(SEED_CAPITAL);
   const [expenses, setExpenses] = useState(SEED_EXPENSES);
   const [salesLog, setSalesLog] = useState(SEED_SALES_LOG);
+  const [consigns, setConsigns] = useState([]); // buku setoran titip jual
   const [toast, setToast] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [role, setRole] = useState(null); // null = belum login, "cashier" | "manager"
@@ -740,8 +744,9 @@ export default function App() {
     const res = await Promise.allSettled([
       Products.list(), Movements.list(), OrdersApi.list(), DebtsApi.list(),
       Capital.list(), Expenses.list(), Sales.list({ sinceDays: 90 }), SettingsApi.get(),
+      Consign.list(),
     ]);
-    const [p, mv, od, dz, cap, exp, sl, st] = res;
+    const [p, mv, od, dz, cap, exp, sl, st, cg] = res;
     if (p.status === "fulfilled") setProducts(p.value);
     if (mv.status === "fulfilled") setMovements(mv.value);
     if (od.status === "fulfilled") setOrders(od.value);
@@ -749,6 +754,7 @@ export default function App() {
     if (cap.status === "fulfilled") setCapital(cap.value);
     if (exp.status === "fulfilled") setExpenses(exp.value);
     if (sl.status === "fulfilled") setSalesLog(sl.value);
+    if (cg.status === "fulfilled") setConsigns(cg.value);
     if (st.status === "fulfilled" && st.value) setStore((s) => ({ ...s, ...st.value }));
     const failed = res.filter((r) => r.status === "rejected");
     if (failed.length) { console.error("[load]", failed.map((f) => f.reason)); flash("Sebagian data gagal dimuat — cek koneksi/akses"); }
@@ -818,14 +824,61 @@ export default function App() {
       const rec = {
         productId: it.pid, qty: it.qty, revenue: it.revenue, date: "Hari ini",
         ts: Date.now(), txnId: ctx.txnId || null, cashier: ctx.cashier || null, method: ctx.method || null,
+        qtyLabel: it.qtyLabel || `${num(it.qty)} ${p?.unit || ""}`.trim(),
+        receiptNo: ctx.receiptNo || null,
       };
       setSalesLog((sl) => [{ id: uid(), ...rec, cost: est }, ...sl]);
+      // Titip jual: barang laku = muncul kewajiban setor ke distributor sebesar HPP-nya
+      const isConsign = !!p?.isConsign;
+      if (isConsign && !hasSupabase) {
+        setConsigns((cs) => [{
+          id: uid(), productId: it.pid, productName: p?.name || "—", supplier: p?.supplier || "",
+          txnId: ctx.txnId || null, qty: it.qty, amount: est, status: "belum", paidAt: null, ts: Date.now(),
+        }, ...cs]);
+      }
       persist(() => Movements.create({ productId: it.pid, type: "out", qty: it.qty, note }));
       persist(async () => {
         const cost = await Products.consumeFifo(it.pid, it.qty); // HPP FIFO dari server
         await Sales.create({ ...rec, cost });
+        if (isConsign) {
+          const row = await Consign.create({
+            productId: it.pid, productName: p?.name || "—", supplier: p?.supplier || "",
+            txnId: ctx.txnId || null, qty: it.qty, amount: cost,
+          });
+          setConsigns((cs) => [row, ...cs]);
+        }
       });
     });
+  };
+
+  // ===== Hapus transaksi (mode manajer) =====
+  // Stok dikembalikan (batch FIFO baru dengan modal = HPP saat terjual),
+  // pergerakan tercatat, kewajiban titip jual yang belum disetor ikut terhapus.
+  const voidTxn = async (t) => {
+    if (hasSupabase) {
+      try { await Sales.voidTxn(t.txnId); }
+      catch (e) { console.error("[void]", e); flash("Gagal menghapus transaksi — cek koneksi"); return false; }
+    }
+    setSalesLog((sl) => sl.filter((s) => s.txnId !== t.txnId));
+    const back = {};
+    (t.items || []).forEach((it) => { if (it.pid) back[it.pid] = (back[it.pid] || 0) + it.qty; });
+    setProducts((ps) => ps.map((p) => (back[p.id] ? { ...p, stock: p.stock + back[p.id] } : p)));
+    setMovements((m) => [
+      ...(t.items || []).filter((it) => it.pid).map((it) => ({ id: uid(), productId: it.pid, type: "in", qty: it.qty, note: "Pembatalan transaksi", at: "Baru saja" })),
+      ...m,
+    ]);
+    setConsigns((cs) => cs.filter((c) => !(c.txnId === t.txnId && c.status === "belum")));
+    flash("Transaksi dihapus — stok dikembalikan");
+    return true;
+  };
+
+  // ===== Setoran titip jual: tandai lunas ke distributor =====
+  const settleConsigns = (ids) => {
+    if (!ids || ids.length === 0) return;
+    const paidAt = today;
+    setConsigns((cs) => cs.map((c) => (ids.includes(c.id) ? { ...c, status: "lunas", paidAt } : c)));
+    persist(() => Consign.settleMany(ids, paidAt));
+    flash("Setoran ke distributor dicatat lunas");
   };
 
   const logout = () => { if (hasSupabase) Auth.signOut(); clearCashierSession(); setRole(null); setSidebarOpen(false); setShiftReport(null); setCashierName(""); loadedRef.current = false; };
@@ -933,6 +986,11 @@ export default function App() {
     persist(() => DebtsApi.settle(id, today));
     flash("Hutang ditandai lunas");
   };
+  const deleteDebt = (id) => {
+    setDebts((ds) => ds.filter((d) => d.id !== id));
+    persist(() => DebtsApi.remove(id));
+    flash("Catatan hutang dihapus");
+  };
 
   // ===== Cetak nota =====
   const nowStamp = () => new Date().toLocaleString("id-ID", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -967,20 +1025,31 @@ export default function App() {
     items: [{ name: "Tes Cetak Struk", qtyLabel: "1", lineTotal: 0 }],
     total: 0, methodLabel: "Tes", paid: 0, change: 0,
   });
-  const buildSaleReceipt = (total, method, meta) => {
-    const no = invoiceNo();
+  const buildSaleReceipt = (total, method, meta, no) => {
     return {
       kind: method === "hutang" ? "hutang" : "jual",
-      no, date: nowStamp(), cashier: cashierName || "Kasir",
+      no: no || invoiceNo(), date: nowStamp(), cashier: cashierName || "Kasir",
       items: meta.items || [], total, methodLabel: PAY_LABEL[method] || method,
       paid: meta.paid, change: meta.change,
       debtor: meta.debtor, business: meta.business, phone: meta.phone,
+      settled: method === "hutang" ? false : undefined, // nota hutang baru = stempel BELUM LUNAS
     };
   };
   const debtToReceipt = (d) => ({
     kind: "hutang", no: d.id, date: d.date, cashier: cashierName || "Kasir",
     items: d.items, total: d.total, debtor: d.debtor, business: d.business, phone: d.phone,
     settled: d.status === "lunas", paidAt: d.paidAt || null,
+  });
+  // Cetak ulang nota dari Riwayat Penjualan (data direkonstruksi dari log transaksi)
+  const txnToReceipt = (t) => ({
+    kind: t.method === "hutang" ? "hutang" : "jual",
+    no: t.no,
+    date: t.ts ? new Date(t.ts).toLocaleString("id-ID", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—",
+    cashier: t.cashier || "—",
+    items: (t.items || []).map((it) => ({ name: it.name, qtyLabel: it.qtyLabel, lineTotal: it.lineTotal })),
+    total: t.total, methodLabel: PAY_LABEL[t.method] || t.method || "—",
+    paid: t.total, change: null,
+    reprint: true,
   });
 
   const applySimulation = (rows) => {
@@ -995,10 +1064,11 @@ export default function App() {
     () => products.filter((p) => stockStatus(p) !== "ok"),
     [products]
   );
-  // Nilai inventory: dari harga batch FIFO (server) agar sinkron dengan Akuntansi;
-  // fallback: stok × modal terbaru (mode lokal / sebelum data termuat)
+  // Nilai inventory MILIK TOKO: dari harga batch FIFO (server) agar sinkron dengan
+  // Akuntansi; barang titipan (milik distributor) tidak dihitung sebagai aset.
+  // Fallback: stok × modal terbaru (mode lokal / sebelum data termuat)
   const localInvValue = useMemo(
-    () => products.reduce((a, p) => a + p.cost * p.stock, 0),
+    () => products.reduce((a, p) => a + (p.isConsign ? 0 : p.cost * p.stock), 0),
     [products]
   );
   const [inventoryValue, setInventoryValue] = useState(0);
@@ -1128,7 +1198,11 @@ export default function App() {
             />
           )}
           {view === "riwayat" && (
-            <SalesHistory salesLog={salesLog} products={products} />
+            <SalesHistory
+              salesLog={salesLog} products={products} managerMode={managerMode}
+              onPrint={(t) => triggerPrint(txnToReceipt(t))}
+              onVoid={voidTxn}
+            />
           )}
           {view === "stok" && (
             <Inventory products={products} movements={movements} pById={pById}
@@ -1140,14 +1214,15 @@ export default function App() {
             <Kasir products={products}
               onCheckout={(lines, total, method, meta) => {
                 const txnId = uid();
+                const no = invoiceNo(); // nomor nota disimpan ke log agar bisa dicetak ulang
                 sellItems(
-                  (meta.items || []).map((it) => ({ pid: it.pid, qty: it.qty, revenue: it.lineTotal })),
+                  (meta.items || []).map((it) => ({ pid: it.pid, qty: it.qty, revenue: it.lineTotal, qtyLabel: it.qtyLabel })),
                   `Penjualan kasir (${PAY_LABEL[method]})`,
-                  { txnId, cashier: cashierName || "Kasir", method }
+                  { txnId, cashier: cashierName || "Kasir", method, receiptNo: no }
                 );
                 if (method === "hutang") { addDebt(meta, total); flash(`Hutang ${rp(total)} dicatat — ${meta?.debtor || "Pelanggan"}`); }
                 else flash(`Pembayaran ${rp(total)} via ${PAY_LABEL[method]} berhasil`);
-                setPrintReceipt(buildSaleReceipt(total, method, meta));
+                setPrintReceipt(buildSaleReceipt(total, method, meta, no));
                 setReceiptModal(true);
               }}
             />
@@ -1161,7 +1236,7 @@ export default function App() {
                 sellItems(
                   o.items.map((it) => { const p = pById(it.pid); return { pid: it.pid, qty: it.qty, revenue: (p?.price || 0) * it.qty }; }),
                   `Order ${o.id}`,
-                  { txnId, cashier: "Order Online", method: "order" }
+                  { txnId, cashier: "Order Online", method: "order", receiptNo: o.id }
                 );
                 flash(`${o.id} diterima & stok dipotong`);
               }}
@@ -1174,14 +1249,18 @@ export default function App() {
             />
           )}
           {view === "hutang" && (
-            <Debts debts={debts} onSettle={settleDebt} onPrint={(d) => triggerPrint(debtToReceipt(d))} />
+            <Debts debts={debts} onSettle={settleDebt} onPrint={(d) => triggerPrint(debtToReceipt(d))}
+              onDelete={managerMode ? deleteDebt : null} />
+          )}
+          {view === "titipjual" && (
+            <ConsignView products={products} consigns={consigns} onSettle={settleConsigns} setView={setView} />
           )}
           {view === "simulasi" && (
             <Simulation products={products} onApply={applySimulation} />
           )}
           {view === "akuntansi" && (
             <Accounting
-              products={products} capital={capital} expenses={expenses} salesLog={salesLog} flash={flash}
+              products={products} capital={capital} expenses={expenses} salesLog={salesLog} consigns={consigns} flash={flash}
               onAddCapital={addCapital} onUpdateCapital={updateCapital} onDeleteCapital={deleteCapital}
               onAddExpense={addExpense} onUpdateExpense={updateExpense} onDeleteExpense={deleteExpense}
             />
@@ -1356,7 +1435,8 @@ function Dashboard({ products, chart, todayRev, deltaPct, lowStock, inventoryVal
       <div className="grid-4">
         <Stat icon={Wallet} accent label="Penjualan hari ini" value={rp(todaySales)}
           sub={<span className={delta >= 0 ? "up" : "down"}>{delta >= 0 ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />}{Math.abs(delta)}% vs kemarin</span>} />
-        <Stat icon={Boxes} label="Nilai inventory" value={rp(inventoryValue)} sub={`${products.length} jenis barang`} />
+        <Stat icon={Boxes} label="Nilai inventory" value={rp(inventoryValue)}
+          sub={products.some((p) => p.isConsign) ? `${products.length} jenis · milik toko (tanpa titipan)` : `${products.length} jenis barang`} />
         <Stat icon={Globe} label="Order online baru" value={num(newOrders)} sub="menunggu diproses" />
         <Stat icon={AlertTriangle} label="Perlu re-stok" value={num(lowStock.length)} sub="di bawah titik pesan" />
       </div>
@@ -1433,27 +1513,45 @@ function Dashboard({ products, chart, todayRev, deltaPct, lowStock, inventoryVal
 
 /* ============================ Riwayat Penjualan ============================ */
 
-function SalesHistory({ salesLog, products }) {
+function SalesHistory({ salesLog, products, managerMode, onPrint, onVoid }) {
   const [range, setRange] = useState("today"); // today | all
+  const [q, setQ] = useState("");
   const [open, setOpen] = useState({});
+  const [del, setDel] = useState(null); // transaksi yang akan dihapus (manajer)
+  const [busy, setBusy] = useState(false);
   const pName = (id) => products.find((p) => p.id === id)?.name || "Barang";
+  const pUnit = (id) => products.find((p) => p.id === id)?.unit || "";
+
+  // Nomor nota cadangan untuk transaksi lama (sebelum nomor nota disimpan ke log):
+  // diturunkan dari waktu transaksi dengan format yang sama seperti nota asli.
+  const noFromTs = (ts) => {
+    if (!ts) return "INV-—";
+    const d = new Date(ts); const p2 = (n) => String(n).padStart(2, "0");
+    return `INV-${String(d.getFullYear()).slice(2)}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+  };
 
   // Kelompokkan baris per transaksi (txnId)
   const txns = useMemo(() => {
     const map = {};
     salesLog.forEach((s) => {
       if (!s.txnId) return;
-      if (!map[s.txnId]) map[s.txnId] = { txnId: s.txnId, ts: s.ts, cashier: s.cashier || "—", method: s.method || "-", items: [], total: 0, qty: 0 };
+      if (!map[s.txnId]) map[s.txnId] = { txnId: s.txnId, ts: s.ts, cashier: s.cashier || "—", method: s.method || "-", no: null, items: [], total: 0, qty: 0 };
       const t = map[s.txnId];
-      t.items.push({ name: pName(s.productId), qty: s.qty, lineTotal: s.revenue });
+      t.items.push({ pid: s.productId, name: pName(s.productId), qty: s.qty, qtyLabel: s.qtyLabel || `${num(s.qty)} ${pUnit(s.productId)}`.trim(), lineTotal: s.revenue });
       t.total += s.revenue; t.qty += s.qty;
+      if (!t.no && s.receiptNo) t.no = s.receiptNo;
       if (s.ts && (!t.ts || s.ts < t.ts)) t.ts = s.ts;
     });
-    return Object.values(map).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    return Object.values(map)
+      .map((t) => ({ ...t, no: t.no || noFromTs(t.ts) }))
+      .sort((a, b) => (b.ts || 0) - (a.ts || 0));
   }, [salesLog, products]);
 
   const isToday = (ts) => ts && new Date(ts).toDateString() === new Date().toDateString();
-  const list = range === "today" ? txns.filter((t) => isToday(t.ts)) : txns;
+  const effRange = managerMode ? range : "today"; // kasir: hanya hari ini
+  let list = effRange === "today" ? txns.filter((t) => isToday(t.ts)) : txns;
+  const term = q.trim().toLowerCase();
+  if (term) list = list.filter((t) => (t.no + " " + t.cashier + " " + t.items.map((i) => i.name).join(" ")).toLowerCase().includes(term));
 
   const total = list.reduce((a, t) => a + t.total, 0);
   const byCashier = {};
@@ -1466,58 +1564,116 @@ function SalesHistory({ salesLog, products }) {
   return (
     <div className="stack">
       <div className="acc-toolbar">
-        <div className="seg">
-          <button className={`seg-btn ${range === "today" ? "on" : ""}`} onClick={() => setRange("today")}>Hari ini</button>
-          <button className={`seg-btn ${range === "all" ? "on" : ""}`} onClick={() => setRange("all")}>90 hari</button>
+        {managerMode ? (
+          <div className="seg">
+            <button className={`seg-btn ${range === "today" ? "on" : ""}`} onClick={() => setRange("today")}>Hari ini</button>
+            <button className={`seg-btn ${range === "all" ? "on" : ""}`} onClick={() => setRange("all")}>90 hari</button>
+          </div>
+        ) : (
+          <div className="muted" style={{ fontSize: 13 }}>Transaksi <b>hari ini</b> — cetak ulang nota bila pelanggan membutuhkan.</div>
+        )}
+        <div className="search" style={{ maxWidth: 300 }}>
+          <Search size={15} />
+          <input placeholder="Cari no. nota / kasir / barang…" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
-        <div className="muted" style={{ fontSize: 13 }}>{list.length} transaksi · {rp(total)}</div>
       </div>
 
-      <div className="grid-4">
-        <Stat icon={Wallet} accent label={range === "today" ? "Penjualan hari ini" : "Total penjualan"} value={rp(total)} sub={`${list.length} transaksi`} />
-        <Stat icon={ShoppingCart} label="Barang terjual" value={num(list.reduce((a, t) => a + t.qty, 0))} sub="total unit" />
-        <Stat icon={Banknote} label="Tunai" value={rp(byMethod.cash || 0)} sub="metode tunai" />
-        <Stat icon={Landmark} label="Non-tunai" value={rp(total - (byMethod.cash || 0))} sub="transfer/qris/kartu/order" />
-      </div>
-
-      <section className="card">
-        <div className="card-head"><h2>Penjualan per kasir</h2></div>
-        <div className="cashier-chips">
-          {Object.keys(byCashier).length === 0 && <div className="empty">Belum ada transaksi.</div>}
-          {Object.entries(byCashier).sort((a, b) => b[1] - a[1]).map(([c, v]) => (
-            <div key={c} className="cashier-chip">
-              <div className="cc-ava">{(c[0] || "?").toUpperCase()}</div>
-              <div><div className="cc-name">{c}</div><div className="cc-val">{rp(v)}</div></div>
-            </div>
-          ))}
+      {managerMode && (
+        <div className="grid-4">
+          <Stat icon={Wallet} accent label={effRange === "today" ? "Penjualan hari ini" : "Total penjualan"} value={rp(total)} sub={`${list.length} transaksi`} />
+          <Stat icon={ShoppingCart} label="Barang terjual" value={num(list.reduce((a, t) => a + t.qty, 0))} sub="total unit" />
+          <Stat icon={Banknote} label="Tunai" value={rp(byMethod.cash || 0)} sub="metode tunai" />
+          <Stat icon={Landmark} label="Non-tunai" value={rp(total - (byMethod.cash || 0))} sub="transfer/qris/kartu/order" />
         </div>
-      </section>
+      )}
+
+      {managerMode && (
+        <section className="card">
+          <div className="card-head"><h2>Penjualan per kasir</h2></div>
+          <div className="cashier-chips">
+            {Object.keys(byCashier).length === 0 && <div className="empty">Belum ada transaksi.</div>}
+            {Object.entries(byCashier).sort((a, b) => b[1] - a[1]).map(([c, v]) => (
+              <div key={c} className="cashier-chip">
+                <div className="cc-ava">{(c[0] || "?").toUpperCase()}</div>
+                <div><div className="cc-name">{c}</div><div className="cc-val">{rp(v)}</div></div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="card">
-        <div className="card-head"><h2>Daftar transaksi</h2><span className="muted">Hanya bisa dilihat manajer</span></div>
+        <div className="card-head">
+          <h2>Daftar transaksi</h2>
+          <span className="muted">{list.length} transaksi{managerMode ? ` · ${rp(total)}` : ""}</span>
+        </div>
         <div className="txn-list">
           {list.length === 0 && <div className="empty">Belum ada transaksi pada periode ini.</div>}
           {list.map((t) => (
             <div key={t.txnId} className={`txn ${open[t.txnId] ? "open" : ""}`}>
-              <button className="txn-head" onClick={() => setOpen((o) => ({ ...o, [t.txnId]: !o[t.txnId] }))}>
-                <div className="txn-time">{fmtTime(t.ts)}</div>
+              <div className="txn-head" role="button" tabIndex={0}
+                onClick={() => setOpen((o) => ({ ...o, [t.txnId]: !o[t.txnId] }))}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setOpen((o) => ({ ...o, [t.txnId]: !o[t.txnId] })); }}>
+                <div className="txn-time">{fmtTime(t.ts)} <span className="txn-no">{t.no}</span></div>
                 <div className="txn-cashier"><User size={12} /> {t.cashier}</div>
                 <div className={`txn-method m-${t.method}`}>{PAY_LABEL[t.method] || t.method}</div>
                 <div className="txn-qty">{t.qty} brg</div>
                 <div className="txn-total">{rp(t.total)}</div>
+                <div className="txn-acts" onClick={(e) => e.stopPropagation()}>
+                  <button className="icon-btn xs" title="Cetak ulang nota" onClick={() => onPrint(t)}><Printer size={15} /></button>
+                  {managerMode && (
+                    <button className="icon-btn xs danger-h" title="Hapus transaksi (salah input)" onClick={() => setDel(t)}><Trash2 size={15} /></button>
+                  )}
+                </div>
                 <ChevronRight size={15} className="txn-caret" />
-              </button>
+              </div>
               {open[t.txnId] && (
                 <div className="txn-items">
                   {t.items.map((it, i) => (
-                    <div key={i} className="txn-item"><span>{it.qty}× {it.name}</span><span className="tab">{rp(it.lineTotal)}</span></div>
+                    <div key={i} className="txn-item"><span>{it.qtyLabel} · {it.name}</span><span className="tab">{rp(it.lineTotal)}</span></div>
                   ))}
+                  <div className="txn-item-foot">
+                    <button className="btn ghost sm" onClick={() => onPrint(t)}><Printer size={14} /> Cetak ulang nota</button>
+                    {managerMode && <button className="btn ghost sm danger-h" onClick={() => setDel(t)}><Trash2 size={14} /> Hapus transaksi</button>}
+                  </div>
                 </div>
               )}
             </div>
           ))}
         </div>
       </section>
+
+      <Modal
+        open={!!del}
+        onClose={() => { if (!busy) setDel(null); }}
+        title="Hapus transaksi?"
+        footer={
+          <>
+            <button className="btn ghost" disabled={busy} onClick={() => setDel(null)}>Batal</button>
+            <button className="btn danger" disabled={busy} onClick={async () => {
+              setBusy(true);
+              const ok = await onVoid(del);
+              setBusy(false);
+              if (ok !== false) setDel(null);
+            }}><Trash2 size={15} /> {busy ? "Menghapus…" : "Ya, hapus"}</button>
+          </>
+        }
+      >
+        {del && (
+          <div className="confirm-text">
+            <p style={{ margin: "0 0 8px" }}>
+              Transaksi <b>{del.no}</b> ({fmtTime(del.ts)}) oleh <b>{del.cashier}</b> senilai <b>{rp(del.total)}</b> akan
+              dihapus <b>permanen</b> dari riwayat & laporan akuntansi.
+            </p>
+            <p style={{ margin: "0 0 8px" }}>
+              Stok barang <b>dikembalikan otomatis</b> ({del.items.map((it) => `${num(it.qty)}× ${it.name}`).join(", ")}).
+            </p>
+            {del.method === "hutang" && (
+              <div className="pay-note warn">Transaksi ini tercatat sebagai <b>hutang</b>. Hapus juga catatan hutangnya di halaman <b>Hutang</b> agar tidak tertagih dua kali.</div>
+            )}
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -1548,13 +1704,14 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
   }, [moveFor]);
 
   const cats = ["all", ...Array.from(new Set(products.map((p) => p.category)))];
+  const hasConsign = products.some((p) => p.isConsign);
   const list = products.filter((p) => {
     const okQ = (p.name + p.sku + p.code).toLowerCase().includes(q.toLowerCase());
-    const okF = filter === "all" || p.category === filter;
+    const okF = filter === "all" || (filter === "__titipan" ? p.isConsign : p.category === filter);
     return okQ && okF;
   });
 
-  const openMove = (p, type) => { setMoveFor(p); setMoveType(type); setQty(1); setBuyCost(p.cost || 0); setNote(type === "in" ? "Pembelian supplier" : "Penyesuaian"); };
+  const openMove = (p, type) => { setMoveFor(p); setMoveType(type); setQty(1); setBuyCost(p.cost || 0); setNote(type === "in" ? (p.isConsign ? "Terima barang titipan" : "Pembelian supplier") : "Penyesuaian"); };
   const submitMove = () => { onMove(moveFor.id, moveType, Number(qty) || 0, note, moveType === "in" ? (Number(buyCost) || 0) : undefined); setMoveFor(null); };
 
   return (
@@ -1570,6 +1727,11 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
               {c === "all" ? "Semua" : c}
             </button>
           ))}
+          {hasConsign && (
+            <button className={`chip ${filter === "__titipan" ? "on" : ""}`} onClick={() => setFilter("__titipan")}>
+              <Handshake size={13} /> Titipan
+            </button>
+          )}
         </div>
         <button className="btn" onClick={() => setFormFor({})}><Plus size={16} /> Tambah Barang</button>
       </div>
@@ -1587,8 +1749,12 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
               <tr key={p.id}>
                 <td><span className="idcode">{p.code}</span></td>
                 <td>
-                  <div className="strong">{p.name}</div>
+                  <div className="strong">
+                    {p.name}
+                    {p.isConsign && <span className="consign-tag"><Handshake size={11} /> Titipan</span>}
+                  </div>
                   {p.sku && <div className="muted xs">SKU {p.sku}</div>}
+                  {p.isConsign && p.supplier && <div className="muted xs">Milik {p.supplier}</div>}
                 </td>
                 <td className="muted">{p.category}</td>
                 <td className="r">
@@ -1646,10 +1812,16 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
             </label>
             {moveType === "in" && (
               <label className="fld">
-                <span>Harga beli / {moveFor.unit || "satuan"} (Rp)</span>
+                <span>Harga {moveFor.isConsign ? "setoran" : "beli"} / {moveFor.unit || "satuan"} (Rp)</span>
                 <input type="number" value={buyCost} onChange={(e) => setBuyCost(e.target.value)} />
                 <span className="hint">Dicatat sebagai batch FIFO baru. Harga modal terakhir: {rp(moveFor.cost)}</span>
               </label>
+            )}
+            {moveType === "in" && moveFor.isConsign && (
+              <div className="pay-note">
+                Barang <b>titip jual</b> milik {moveFor.supplier || "distributor"}: harga di atas = nilai setoran per {moveFor.unit || "satuan"}.
+                Belum jadi pengeluaran — kewajiban setor baru tercatat otomatis saat barangnya laku (lihat menu <b>Titip Jual</b>).
+              </div>
             )}
             <label className="fld">
               <span>Catatan</span>
@@ -1717,6 +1889,7 @@ function ProductForm({ product, products, categories, onClose, onSave }) {
       name: "", sku: "", category: "", unit: "pcs", price: 0, cost: 0, stock: 0,
       cartonSize: 0, priceCarton: 0, promo: { active: false, type: "percent", value: 0 },
       dailyUsage: 1, leadTime: 1, safetyStock: 0,
+      isConsign: false, supplier: "",
     }
   );
   const [skuTouched, setSkuTouched] = useState(!!product); // mode edit: jangan auto-ganti
@@ -1727,6 +1900,7 @@ function ProductForm({ product, products, categories, onClose, onSave }) {
 
   const allProducts = products || [];
   const unitOptions = Array.from(new Set([...allProducts.map((p) => p.unit).filter(Boolean), "pcs", "botol", "kg", "pack", "sachet", "box"]));
+  const supplierOptions = Array.from(new Set(allProducts.map((p) => p.supplier).filter(Boolean)));
 
   // Saat kategori berganti, SKU ikut dibuat otomatis (selama belum diubah manual)
   const onCategory = (v) =>
@@ -1749,6 +1923,7 @@ function ProductForm({ product, products, categories, onClose, onSave }) {
       cartonSize: csize, priceCarton: csize > 0 ? Number(f.priceCarton) || 0 : 0,
       promo: { active: !!promo.active, type: promo.type || "percent", value: Number(promo.value) || 0 },
       dailyUsage: Number(f.dailyUsage) || 0, leadTime: Number(f.leadTime) || 0, safetyStock: Number(f.safetyStock) || 0,
+      isConsign: !!f.isConsign, supplier: f.isConsign ? String(f.supplier || "").trim() : "",
     });
   };
 
@@ -1799,6 +1974,27 @@ function ProductForm({ product, products, categories, onClose, onSave }) {
             <input type="number" value={f.cost} onChange={(e) => n("cost", e.target.value)} />
             {product && <span className="hint">Referensi modal terbaru. HPP penjualan mengikuti harga batch FIFO masing-masing.</span>}
           </label>
+        </div>
+
+        <div className="promo-box">
+          <div className="promo-row">
+            <button type="button" className={`switch ${f.isConsign ? "on" : ""}`} onClick={() => set("isConsign", !f.isConsign)}>
+              <span className="knob" />
+            </button>
+            <span className="promo-label"><Handshake size={14} style={{ verticalAlign: "-2px" }} /> Barang titip jual (konsinyasi)</span>
+          </div>
+          {f.isConsign && (
+            <>
+              <label className="fld">
+                <span>Distributor / pemilik barang</span>
+                <PickOrAdd value={f.supplier} options={supplierOptions} onChange={(v) => set("supplier", v)} placeholder="Pilih distributor" addLabel="Distributor baru…" />
+              </label>
+              <div className="muted xs">
+                Barang milik distributor — dibayar hanya setelah laku. Harga modal di atas = nilai setoran per satuan.
+                Stoknya tidak dihitung sebagai aset toko, dan kewajiban setor tercatat otomatis di menu <b>Titip Jual</b> saat barang terjual.
+              </div>
+            </>
+          )}
         </div>
 
         <div className="form-section">Harga jual & promo</div>
@@ -2282,9 +2478,10 @@ function OrderForm({ products, onClose, onSave }) {
 
 /* ============================ Hutang ============================ */
 
-function Debts({ debts, onSettle, onPrint }) {
+function Debts({ debts, onSettle, onPrint, onDelete }) {
   const [tab, setTab] = useState("belum");
   const [confirm, setConfirm] = useState(null);
+  const [del, setDel] = useState(null); // catatan hutang yang akan dihapus (manajer)
 
   const counts = {
     belum: debts.filter((d) => d.status === "belum").length,
@@ -2343,6 +2540,9 @@ function Debts({ debts, onSettle, onPrint }) {
             <div className="debt-foot">
               <div className="debt-total"><span className="muted xs">Total</span><span className="tab">{rp(d.total)}</span></div>
               <div className="debt-actions">
+                {onDelete && (
+                  <button className="icon-btn xs danger-h" title="Hapus catatan hutang (salah input)" onClick={() => setDel(d)}><Trash2 size={15} /></button>
+                )}
                 <button className="btn ghost sm" onClick={() => onPrint(d)}><Printer size={14} /> Cetak</button>
                 {d.status === "belum"
                   ? <button className="btn sm" onClick={() => setConfirm(d)}><CheckCircle2 size={15} /> Lunas</button>
@@ -2369,6 +2569,180 @@ function Debts({ debts, onSettle, onPrint }) {
             Tandai hutang <b>{confirm.id}</b> dari <b>{confirm.debtor}{confirm.business ? ` (${confirm.business})` : ""}</b>
             {" "}sebesar <b>{rp(confirm.total)}</b> sebagai sudah dibayar?
           </p>
+        )}
+      </Modal>
+
+      <Modal
+        open={!!del}
+        onClose={() => setDel(null)}
+        title="Hapus catatan hutang?"
+        footer={
+          <>
+            <button className="btn ghost" onClick={() => setDel(null)}>Batal</button>
+            <button className="btn danger" onClick={() => { onDelete(del.id); setDel(null); }}><Trash2 size={15} /> Ya, hapus</button>
+          </>
+        }
+      >
+        {del && (
+          <div className="confirm-text">
+            <p style={{ margin: "0 0 8px" }}>
+              Catatan hutang <b>{del.id}</b> dari <b>{del.debtor}{del.business ? ` (${del.business})` : ""}</b> sebesar{" "}
+              <b>{rp(del.total)}</b> akan dihapus <b>permanen</b>.
+            </p>
+            <div className="pay-note warn">
+              Menghapus catatan ini <b>tidak</b> mengembalikan stok atau menghapus penjualannya. Jika seluruh transaksinya
+              salah input, hapus transaksinya lewat halaman <b>Riwayat Penjualan</b> (stok kembali otomatis), lalu hapus catatan ini.
+            </div>
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+}
+
+/* ============================ Titip Jual (Konsinyasi) ============================ */
+
+function ConsignView({ products, consigns, onSettle, setView }) {
+  const [tab, setTab] = useState("belum");
+  const [confirm, setConfirm] = useState(null); // { supplier, rows, total, qty }
+  const consignProducts = products.filter((p) => p.isConsign);
+
+  const belum = consigns.filter((c) => c.status === "belum");
+  const lunas = consigns.filter((c) => c.status === "lunas");
+  const owed = belum.reduce((a, c) => a + c.amount, 0);
+  const paidTotal = lunas.reduce((a, c) => a + c.amount, 0);
+
+  // Nilai stok titipan (milik distributor) — server RPC, fallback hitung lokal
+  const [consignStock, setConsignStock] = useState(0);
+  useEffect(() => {
+    const local = consignProducts.reduce((a, p) => a + (p.cost || 0) * (p.stock || 0), 0);
+    setConsignStock(local);
+    if (!hasSupabase) return;
+    let alive = true;
+    Products.inventoryValueConsign()
+      .then((v) => { if (alive) setConsignStock(v); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [products]);
+
+  // Kelompokkan kewajiban setor per distributor
+  const bySupplier = useMemo(() => {
+    const m = {};
+    belum.forEach((c) => {
+      const k = c.supplier || "Tanpa nama distributor";
+      if (!m[k]) m[k] = { supplier: k, rows: [], total: 0, qty: 0 };
+      m[k].rows.push(c); m[k].total += c.amount; m[k].qty += c.qty;
+    });
+    return Object.values(m).sort((a, b) => b.total - a.total);
+  }, [consigns]);
+
+  const fmtTs = (ts) => ts ? new Date(ts).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+
+  return (
+    <div className="stack">
+      <div className="grid-4">
+        <Stat icon={Handshake} accent label="Belum disetor" value={rp(owed)} sub={`${belum.length} barang laku`} />
+        <Stat icon={Boxes} label="Nilai stok titipan" value={rp(consignStock)} sub="milik distributor" />
+        <Stat icon={Package} label="Barang titipan" value={num(consignProducts.length)} sub="jenis barang" />
+        <Stat icon={CheckCircle2} label="Sudah disetor" value={rp(paidTotal)} sub="sepanjang waktu" />
+      </div>
+
+      <div className="pay-note">
+        <b>Cara kerjanya:</b> barang bertanda titip jual milik distributor — begitu laku, nilai setorannya (sebesar HPP) otomatis
+        tercatat di sini. Setoran ini <b>bukan</b> biaya operasional baru karena modalnya sudah terhitung sebagai HPP di laporan
+        laba-rugi, jadi tidak dihitung dua kali.
+      </div>
+
+      <div className="order-tabs">
+        {[["belum", "Belum Disetor"], ["lunas", "Riwayat Setoran"]].map(([k, label]) => (
+          <button key={k} className={`order-tab ${tab === k ? "on" : ""}`} onClick={() => setTab(k)}>
+            {label} {(k === "belum" ? belum : lunas).length > 0 && <span className="tab-count">{(k === "belum" ? belum : lunas).length}</span>}
+          </button>
+        ))}
+      </div>
+
+      {tab === "belum" && (
+        <div className="order-grid">
+          {bySupplier.length === 0 && (
+            <div className="empty card">
+              {consignProducts.length === 0 ? (
+                <>Belum ada barang titip jual. Tandai barang sebagai <b>titip jual</b> lewat form Tambah/Edit Barang di menu{" "}
+                  <button className="link-btn" onClick={() => setView && setView("stok")}>Stok</button>.</>
+              ) : (
+                <>Tidak ada setoran tertunda — semua barang titipan yang laku sudah disetor. 🎉</>
+              )}
+            </div>
+          )}
+          {bySupplier.map((g) => (
+            <div key={g.supplier} className="card debt-card">
+              <div className="sup-head">
+                <div className="sup-name"><Handshake size={15} /> {g.supplier}</div>
+                <span className="pill pill-warn">{g.rows.length} item</span>
+              </div>
+              <div className="sup-rows">
+                {g.rows.map((c) => (
+                  <div key={c.id} className="sup-row">
+                    <span>{c.productName} <span className="muted xs">× {num(c.qty)}</span></span>
+                    <span className="muted xs">{fmtTs(c.ts)}</span>
+                    <span className="tab">{rp(c.amount)}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="sup-foot">
+                <div className="debt-total"><span className="muted xs">Total setoran</span><span className="tab">{rp(g.total)}</span></div>
+                <button className="btn sm" onClick={() => setConfirm(g)}><CheckCircle2 size={15} /> Catat setoran</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === "lunas" && (
+        <section className="card pad0">
+          <table className="tbl">
+            <thead>
+              <tr><th>Terjual</th><th>Barang</th><th>Distributor</th><th className="r">Qty</th><th className="r">Setoran</th><th>Dibayar</th></tr>
+            </thead>
+            <tbody>
+              {lunas.length === 0 && (
+                <tr><td colSpan={6}><div className="empty">Belum ada riwayat setoran.</div></td></tr>
+              )}
+              {lunas.map((c) => (
+                <tr key={c.id}>
+                  <td className="muted">{fmtTs(c.ts)}</td>
+                  <td><div className="strong">{c.productName}</div></td>
+                  <td className="muted">{c.supplier || "—"}</td>
+                  <td className="r tab">{num(c.qty)}</td>
+                  <td className="r tab">{rp(c.amount)}</td>
+                  <td><span className="done-tag"><Check size={14} /> {c.paidAt || "—"}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      <Modal
+        open={!!confirm}
+        onClose={() => setConfirm(null)}
+        title="Catat setoran ke distributor"
+        footer={
+          <>
+            <button className="btn ghost" onClick={() => setConfirm(null)}>Batal</button>
+            <button className="btn" onClick={() => { onSettle(confirm.rows.map((r) => r.id)); setConfirm(null); }}>
+              <CheckCircle2 size={15} /> Ya, sudah disetor
+            </button>
+          </>
+        }
+      >
+        {confirm && (
+          <div className="confirm-text">
+            <p style={{ margin: "0 0 8px" }}>
+              Tandai setoran ke <b>{confirm.supplier}</b> sebesar <b>{rp(confirm.total)}</b> ({confirm.rows.length} item,{" "}
+              {num(confirm.qty)} barang) sebagai <b>sudah dibayar</b>?
+            </p>
+            <div className="pay-note">Pastikan uangnya sudah benar-benar diserahkan/ditransfer ke distributor sebelum menandai lunas.</div>
+          </div>
         )}
       </Modal>
     </div>
@@ -2629,7 +3003,7 @@ function Simulation({ products, onApply }) {
 
 /* ============================ Akuntansi (khusus manajer) ============================ */
 
-function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital, onUpdateCapital, onDeleteCapital, onAddExpense, onUpdateExpense, onDeleteExpense }) {
+function Accounting({ products, capital, expenses, salesLog, consigns = [], flash, onAddCapital, onUpdateCapital, onDeleteCapital, onAddExpense, onUpdateExpense, onDeleteExpense }) {
   const [form, setForm] = useState(null); // { kind:'capital'|'expense', entry }
   const [del, setDel] = useState(null);
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
@@ -2680,14 +3054,28 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
   const opex = monthExpenses.reduce((a, e) => a + e.amount, 0);
   const prevOpex = prevExpenses.reduce((a, e) => a + e.amount, 0);
   const net = gross - opex;
-  // Nilai stok kini: dari harga batch FIFO (server); fallback stok × modal terbaru
-  const [invValue, setInvValue] = useState(() => products.reduce((a, p) => a + p.cost * p.stock, 0));
+  // Nilai stok kini (MILIK TOKO, tanpa titipan): dari harga batch FIFO (server);
+  // fallback stok × modal terbaru
+  const [invValue, setInvValue] = useState(() => products.reduce((a, p) => a + (p.isConsign ? 0 : p.cost * p.stock), 0));
   useEffect(() => {
-    const local = products.reduce((a, p) => a + p.cost * p.stock, 0);
+    const local = products.reduce((a, p) => a + (p.isConsign ? 0 : p.cost * p.stock), 0);
     setInvValue(local);
     if (!hasSupabase) return;
     let alive = true;
     Products.inventoryValue().then((v) => { if (alive) setInvValue(v); }).catch(() => {});
+    return () => { alive = false; };
+  }, [products]);
+
+  // ===== Titip jual (konsinyasi) =====
+  const hasConsign = consigns.length > 0 || products.some((p) => p.isConsign);
+  const consignOwed = consigns.filter((c) => c.status === "belum").reduce((a, c) => a + c.amount, 0);
+  const [consignValue, setConsignValue] = useState(0);
+  useEffect(() => {
+    const local = products.reduce((a, p) => a + (p.isConsign ? (p.cost || 0) * (p.stock || 0) : 0), 0);
+    setConsignValue(local);
+    if (!hasSupabase) return;
+    let alive = true;
+    Products.inventoryValueConsign().then((v) => { if (alive) setConsignValue(v); }).catch(() => {});
     return () => { alive = false; };
   }, [products]);
   const grossMargin = revenue > 0 ? Math.round((gross / revenue) * 100) : 0;
@@ -2844,7 +3232,11 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
       headRow(s1, r, [{ h: "Keterangan" }, { h: "Nilai", a: "right" }]); r++;
       i = 0;
       dataRow(s1, r++, [{ v: "Total modal tertanam" }, { v: totalModal, a: "right", fmt: money }], i++);
-      dataRow(s1, r++, [{ v: "Nilai stok saat ini" }, { v: invValue, a: "right", fmt: money }], i++);
+      dataRow(s1, r++, [{ v: hasConsign ? "Nilai stok saat ini (milik toko)" : "Nilai stok saat ini" }, { v: invValue, a: "right", fmt: money }], i++);
+      if (hasConsign) {
+        dataRow(s1, r++, [{ v: "Nilai stok titipan (milik distributor)" }, { v: consignValue, a: "right", fmt: money }], i++);
+        dataRow(s1, r++, [{ v: "Hutang titip jual (belum disetor)" }, { v: consignOwed, a: "right", fmt: money }], i++);
+      }
       dataRow(s1, r++, [{ v: "ROI per bulan" }, { v: roiBulan / 100, a: "right", fmt: "0.0%" }], i++);
       dataRow(s1, r++, [{ v: "Estimasi balik modal (bulan)" }, { v: paybackMonths || "—", a: "right" }], i++);
 
@@ -2892,6 +3284,32 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
       });
       trow.height = 20;
 
+      // ---------- Sheet 5: Titip Jual (Konsinyasi) ----------
+      if (hasConsign) {
+        let cFrom = 0, cTo = Infinity;
+        if (!isAll) {
+          const [yy, mm] = month.split("-").map(Number);
+          cFrom = new Date(yy, mm - 1, 1).getTime();
+          cTo = new Date(yy, mm, 1).getTime();
+        }
+        const cRows = consigns
+          .filter((c) => c.ts == null || (c.ts >= cFrom && c.ts < cTo))
+          .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+        const cOwedP = cRows.filter((c) => c.status === "belum").reduce((a, c) => a + c.amount, 0);
+        const s5 = wb.addWorksheet("Titip Jual");
+        s5.columns = [{ width: 16 }, { width: 32 }, { width: 22 }, { width: 10 }, { width: 16 }, { width: 22 }];
+        r = banner(s5, "Titip Jual (Konsinyasi)");
+        sectionTitle(s5, r, `SETORAN TITIP JUAL — ${period}`); r++;
+        headRow(s5, r, [{ h: "Terjual" }, { h: "Barang" }, { h: "Distributor" }, { h: "Qty", a: "right" }, { h: "Setoran", a: "right" }, { h: "Status" }]); r++;
+        cRows.forEach((c, idx) => dataRow(s5, r++, [
+          { v: c.ts ? new Date(c.ts).toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" }) : "—" },
+          { v: c.productName }, { v: c.supplier || "—" }, { v: c.qty, a: "right" },
+          { v: c.amount, a: "right", fmt: money },
+          { v: c.status === "lunas" ? `Lunas${c.paidAt ? " · " + c.paidAt : ""}` : "Belum disetor" },
+        ], idx));
+        totalRow(s5, r++, "BELUM DISETOR (periode ini)", cOwedP, 4, C.coral);
+      }
+
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
       const url = URL.createObjectURL(blob);
@@ -2935,6 +3353,29 @@ function Accounting({ products, capital, expenses, salesLog, flash, onAddCapital
         <Stat icon={Wallet} label={isAll ? "Laba bersih (total)" : "Laba bersih (bln)"} value={rp(net)}
           sub={<span className={net >= 0 ? "up" : "down"}>{net >= 0 ? "untung" : "rugi"}</span>} />
       </div>
+
+      {hasConsign && (
+        <section className="card cs-strip">
+          <div className="cs-item">
+            <Handshake size={17} />
+            <div>
+              <div className="muted xs">Hutang titip jual (belum disetor)</div>
+              <b className="tab">{rp(consignOwed)}</b>
+            </div>
+          </div>
+          <div className="cs-item">
+            <Boxes size={17} />
+            <div>
+              <div className="muted xs">Nilai stok titipan (milik distributor)</div>
+              <b className="tab">{rp(consignValue)}</b>
+            </div>
+          </div>
+          <div className="muted xs cs-note">
+            Nilai stok & laba di atas hanya menghitung <b>barang milik toko</b>. Modal barang titipan masuk HPP saat laku —
+            setorannya tidak dihitung lagi sebagai biaya. Kelola di menu <b>Titip Jual</b>.
+          </div>
+        </section>
+      )}
 
       <div className="grid-2-1">
         <section className="card">
@@ -3694,7 +4135,7 @@ function Style() {
       .txn-list{display:flex;flex-direction:column;gap:7px}
       .txn{border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface-2);overflow:hidden}
       .txn.open{border-color:rgba(236,231,218,.18)}
-      .txn-head{width:100%;display:grid;grid-template-columns:auto 1fr auto auto auto auto;gap:12px;align-items:center;
+      .txn-head{width:100%;display:grid;grid-template-columns:auto 1fr auto auto auto auto auto;gap:12px;align-items:center;
         background:none;border:none;font:inherit;color:var(--ink);padding:11px 14px;cursor:pointer;text-align:left}
       .txn-head:hover{background:var(--surface-3)}
       .txn-time{font-size:12.5px;color:var(--ink-soft);white-space:nowrap}
@@ -3711,11 +4152,37 @@ function Style() {
       .txn-items{padding:4px 14px 12px 14px;display:flex;flex-direction:column;gap:5px;border-top:1px dashed var(--line-soft)}
       .txn-item{display:flex;justify-content:space-between;gap:12px;font-size:13px;color:var(--ink-soft);padding-top:6px}
       .txn-item .tab,.shift-row .tab{font-family:'Space Grotesk';font-weight:600;color:var(--ink)}
+      .txn-no{font-family:'Space Grotesk';font-size:11px;color:var(--ink-faint);margin-left:6px}
+      .txn-acts{display:inline-flex;gap:2px}
+      .txn-item-foot{display:flex;gap:8px;flex-wrap:wrap;border-top:1px dashed var(--line-soft);margin-top:6px;padding-top:10px}
+      .btn.ghost.danger-h:hover{border-color:var(--crit);color:var(--crit);background:var(--crit-bg)}
       @media (max-width:640px){
         .txn-head{grid-template-columns:1fr auto auto;grid-auto-rows:auto;gap:6px 10px}
         .txn-time{grid-column:1/-1}
         .txn-qty{display:none}
+        .txn-acts{display:none}
       }
+
+      /* ===== Titip Jual (Konsinyasi) ===== */
+      .consign-tag{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;color:var(--teal);
+        background:var(--teal-soft);border-radius:999px;padding:2px 8px;margin-left:7px;vertical-align:2px;
+        text-transform:uppercase;letter-spacing:.04em}
+      .chip{display:inline-flex;align-items:center;gap:5px}
+      .cs-strip{display:flex;gap:26px;align-items:center;flex-wrap:wrap}
+      .cs-item{display:flex;align-items:center;gap:11px}
+      .cs-item>svg{color:var(--teal);flex-shrink:0}
+      .cs-item b{font-family:'Space Grotesk';font-size:16px}
+      .cs-note{flex:1;min-width:240px;text-align:right;line-height:1.5}
+      @media (max-width:820px){ .cs-note{text-align:left} }
+      .sup-head{display:flex;justify-content:space-between;align-items:center;gap:10px}
+      .sup-name{font-weight:700;display:flex;align-items:center;gap:8px}
+      .sup-name svg{color:var(--teal)}
+      .sup-rows{display:flex;flex-direction:column;gap:7px;margin:11px 0 0;border-top:1px dashed var(--line-soft);padding-top:11px}
+      .sup-row{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:baseline;font-size:13px;color:var(--ink-soft)}
+      .sup-row .tab{font-family:'Space Grotesk';font-weight:600;color:var(--ink)}
+      .sup-foot{display:flex;justify-content:space-between;align-items:center;gap:10px;border-top:1px dashed var(--line-soft);margin-top:11px;padding-top:11px}
+      .link-btn{background:none;border:none;padding:0;font:inherit;font-weight:700;color:var(--teal);cursor:pointer;text-decoration:underline}
+      .link-btn:hover{color:var(--ink)}
 
       /* ===== Ringkasan Shift ===== */
       .shift{display:flex;flex-direction:column;gap:14px}
