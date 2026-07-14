@@ -18,12 +18,14 @@ const rowToProduct = (r) => ({
   stock: Number(r.stock), dailyUsage: Number(r.daily_usage),
   leadTime: r.lead_time, safetyStock: Number(r.safety_stock),
   promo: { active: r.promo_active, type: r.promo_type, value: Number(r.promo_value) },
+  isConsign: !!r.is_consign, supplier: r.supplier || "",
 });
 const productToRow = (p) => ({
   code: p.code, name: p.name, sku: p.sku, category: p.category, unit: p.unit,
   cost: p.cost, price: p.price, carton_size: p.cartonSize || 0, price_carton: p.priceCarton || 0,
   stock: p.stock, daily_usage: p.dailyUsage, lead_time: p.leadTime, safety_stock: p.safetyStock,
   promo_active: p.promo?.active || false, promo_type: p.promo?.type || "percent", promo_value: p.promo?.value || 0,
+  is_consign: !!p.isConsign, supplier: p.supplier || "",
 });
 
 /* ============================ PRODUCTS ============================ */
@@ -63,9 +65,16 @@ export const Products = {
     if (error) throw error;
     return Number(data || 0);
   },
-  // Nilai stok kini berdasarkan harga batch (fallback ke harga modal produk)
+  // Nilai stok MILIK TOKO berdasarkan harga batch (tanpa barang titipan;
+  // fallback ke harga modal produk)
   async inventoryValue() {
     const { data, error } = await supabase.rpc("inventory_value");
+    if (error) throw error;
+    return Number(data || 0);
+  },
+  // Nilai stok barang TITIPAN (milik distributor)
+  async inventoryValueConsign() {
+    const { data, error } = await supabase.rpc("inventory_value_consign");
     if (error) throw error;
     return Number(data || 0);
   },
@@ -154,6 +163,10 @@ export const Debts = {
     const { error } = await supabase.from("debts").update({ status: "lunas", paid_at: paidAt }).eq("id", id);
     if (error) throw error;
   },
+  async remove(id) {
+    const { error } = await supabase.from("debts").delete().eq("id", id);
+    if (error) throw error;
+  },
 };
 
 /* ============================ CAPITAL / EXPENSES ============================ */
@@ -183,14 +196,23 @@ export const Sales = {
       id: r.id, productId: r.product_id, qty: Number(r.qty), revenue: Number(r.revenue), cost: Number(r.cost),
       date: r.date, ts: r.created_at ? Date.parse(r.created_at) : null,
       txnId: r.txn_id || null, cashier: r.cashier || null, method: r.method || null,
+      qtyLabel: r.qty_label || null, receiptNo: r.receipt_no || null,
     }));
   },
   async create(s) {
     const { error } = await supabase.from("sales_log").insert({
       product_id: s.productId, qty: s.qty, revenue: s.revenue, cost: s.cost, date: s.date,
       txn_id: s.txnId || null, cashier: s.cashier || null, method: s.method || null,
+      qty_label: s.qtyLabel || null, receipt_no: s.receiptNo || null,
     });
     if (error) throw error;
+  },
+  // Hapus satu transaksi utuh (semua baris txn_id yang sama) di server.
+  // Stok dikembalikan sebagai batch FIFO & pergerakan tercatat — lihat void_txn di SQL.
+  async voidTxn(txnId) {
+    const { data, error } = await supabase.rpc("void_txn", { p_txn_id: txnId });
+    if (error) throw error;
+    return Number(data || 0);
   },
   // Agregat dihitung di server (akurat & ringan walau data besar). from/to = ISO string atau null.
   async agg(fromISO, toISO) {
@@ -209,6 +231,37 @@ export const Sales = {
     const { data, error } = await supabase.rpc("sales_monthly", { p_from: fromISO ?? null });
     if (error) throw error;
     return (data || []).map((r) => ({ period: r.period, revenue: Number(r.revenue), cost: Number(r.cost) }));
+  },
+};
+
+/* ============================ TITIP JUAL (KONSINYASI) ============================ */
+const rowToConsign = (r) => ({
+  id: r.id, productId: r.product_id, productName: r.product_name || "—",
+  supplier: r.supplier || "", txnId: r.txn_id || null,
+  qty: Number(r.qty), amount: Number(r.amount),
+  status: r.status || "belum", paidAt: r.paid_at || null,
+  ts: r.created_at ? Date.parse(r.created_at) : null,
+});
+export const Consign = {
+  async list() {
+    const { data, error } = await supabase.from("consign_ledger").select("*").order("created_at", { ascending: false });
+    if (error) throw error;
+    return data.map(rowToConsign);
+  },
+  // Catat kewajiban setoran saat barang titipan laku (amount = HPP FIFO)
+  async create(c) {
+    const { data, error } = await supabase.from("consign_ledger").insert({
+      product_id: c.productId, product_name: c.productName, supplier: c.supplier || "",
+      txn_id: c.txnId || null, qty: c.qty, amount: c.amount, status: "belum",
+    }).select().single();
+    if (error) throw error;
+    return rowToConsign(data);
+  },
+  // Tandai beberapa baris sudah disetor ke distributor
+  async settleMany(ids, paidAt) {
+    const { error } = await supabase.from("consign_ledger")
+      .update({ status: "lunas", paid_at: paidAt }).in("id", ids);
+    if (error) throw error;
   },
 };
 
