@@ -732,7 +732,7 @@ export default function App() {
   const pById = (id) => products.find((p) => p.id === id);
 
   // ===== Sinkronisasi Supabase + Autentikasi =====
-  const persist = (fn) => { if (hasSupabase) fn().catch((e) => { console.error("[sync]", e); flash("Gagal menyimpan ke server — cek koneksi"); }); };
+  const persist = (fn) => { if (hasSupabase) fn().catch((e) => { console.error("[sync]", e); flash(`Gagal menyimpan ke server — ${e?.message || "cek koneksi"}`); }); };
 
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(!hasSupabase);
@@ -797,15 +797,36 @@ export default function App() {
     loadAll();
   }, [session]);
 
-  const recordMovement = (productId, type, qty, note, unitCost) => {
+  const recordMovement = async (productId, type, qty, note, unitCost) => {
+    qty = Number(qty) || 0;
+    if (qty <= 0) { flash("Jumlah harus lebih dari 0"); return; }
     const prev = products.find((p) => p.id === productId);
-    const newStock = prev ? Math.max(0, prev.stock + (type === "in" ? qty : -qty)) : 0;
+    const prevStock = prev ? prev.stock : 0;
+    const newStock = Math.max(0, prevStock + (type === "in" ? qty : -qty));
     // Stok masuk = batch FIFO baru dengan harga belinya sendiri; tanpa input harga, pakai modal terakhir
     const costIn = type === "in" ? (unitCost != null && unitCost !== "" ? Number(unitCost) : (prev?.cost || 0)) : null;
+    const mid = uid();
     setProducts((ps) => ps.map((p) => (p.id === productId ? { ...p, stock: newStock, ...(type === "in" ? { cost: costIn } : {}) } : p)));
-    setMovements((m) => [{ id: uid(), productId, type, qty, note, at: "Baru saja" }, ...m]);
-    persist(() => Movements.create({ productId, type, qty, note }));
-    persist(() => (type === "in" ? Products.restockFifo(productId, qty, costIn, note) : Products.consumeFifo(productId, qty)));
+    setMovements((m) => [{ id: mid, productId, type, qty, note, at: "Baru saja" }, ...m]);
+    if (!hasSupabase) return;
+    try {
+      if (type === "in") {
+        // ATOMIK di server: riwayat + batch FIFO + kolom stok diperbarui dalam SATU transaksi (RPC stock_in).
+        // Tidak mungkin lagi "pembelian tercatat tapi stok tidak berubah".
+        const st = await Products.stockIn(productId, qty, costIn, note);
+        if (st != null) setProducts((ps) => ps.map((p) => (p.id === productId ? { ...p, stock: Number(st) } : p)));
+      } else {
+        // Keluar: potong stok di server dulu; riwayat dicatat hanya jika pemotongan berhasil
+        await Products.consumeFifo(productId, qty);
+        await Movements.create({ productId, type, qty, note });
+      }
+    } catch (e) {
+      console.error("[sync]", e);
+      // Gagal simpan → batalkan perubahan lokal supaya angka di layar = angka di database
+      setProducts((ps) => ps.map((p) => (p.id === productId ? { ...p, stock: prevStock, ...(type === "in" ? { cost: prev?.cost || 0 } : {}) } : p)));
+      setMovements((m) => m.filter((x) => x.id !== mid));
+      flash(`GAGAL disimpan — stok tidak berubah. ${e?.message || "Cek koneksi"}`);
+    }
   };
 
   // Penjualan (kasir & order): potong stok FIFO + catat HPP sesuai batch yang benar-benar terpakai.
