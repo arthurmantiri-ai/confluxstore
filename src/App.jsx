@@ -816,9 +816,8 @@ export default function App() {
         const st = await Products.stockIn(productId, qty, costIn, note);
         if (st != null) setProducts((ps) => ps.map((p) => (p.id === productId ? { ...p, stock: Number(st) } : p)));
       } else {
-        // Keluar: potong stok di server dulu; riwayat dicatat hanya jika pemotongan berhasil
-        await Products.consumeFifo(productId, qty);
-        await Movements.create({ productId, type, qty, note });
+        // ATOMIK di server: riwayat + potong batch FIFO + kolom stok dalam SATU transaksi (RPC stock_out)
+        await Products.stockOut(productId, qty, note);
       }
     } catch (e) {
       console.error("[sync]", e);
@@ -857,9 +856,10 @@ export default function App() {
           txnId: ctx.txnId || null, qty: it.qty, amount: est, status: "belum", paidAt: null, ts: Date.now(),
         }, ...cs]);
       }
-      persist(() => Movements.create({ productId: it.pid, type: "out", qty: it.qty, note }));
       persist(async () => {
-        const cost = await Products.consumeFifo(it.pid, it.qty); // HPP FIFO dari server
+        // ATOMIK: riwayat "keluar" + potong batch FIFO + kolom stok dalam SATU transaksi.
+        // Penjualan (sales_log) hanya dicatat bila stok benar-benar terpotong.
+        const cost = await Products.stockOut(it.pid, it.qty, note); // HPP FIFO dari server
         await Sales.create({ ...rec, cost });
         if (isConsign) {
           const row = await Consign.create({
@@ -927,8 +927,8 @@ export default function App() {
         // Buat produk tanpa stok, lalu stok awal dicatat sebagai batch FIFO pertama
         const row = await Products.create({ code, ...data, stock: 0 });
         if (initialStock > 0) {
-          await Products.restockFifo(row.id, initialStock, Number(data.cost) || 0, "Stok awal");
-          await Movements.create({ productId: row.id, type: "in", qty: initialStock, note: "Stok awal" });
+          // ATOMIK: riwayat "Stok awal" + batch FIFO + kolom stok dalam satu transaksi
+          await Products.stockIn(row.id, initialStock, Number(data.cost) || 0, "Stok awal");
         }
         setProducts((ps) => [{ ...row, stock: initialStock }, ...ps]);
         flash(`Barang ${code} ditambahkan`);
@@ -948,10 +948,10 @@ export default function App() {
         { id: uid(), productId: id, type: diff > 0 ? "in" : "out", qty: Math.abs(diff), note: "Penyesuaian (edit barang)", at: "Baru saja" },
         ...m,
       ]);
-      persist(() => Movements.create({ productId: id, type: diff > 0 ? "in" : "out", qty: Math.abs(diff), note: "Penyesuaian (edit barang)" }));
+      // ATOMIK: riwayat + batch FIFO + kolom stok dalam SATU transaksi server
       persist(() => (diff > 0
-        ? Products.restockFifo(id, diff, Number(data.cost) || prev.cost || 0, "Penyesuaian (edit barang)")
-        : Products.consumeFifo(id, Math.abs(diff))));
+        ? Products.stockIn(id, diff, Number(data.cost) || prev.cost || 0, "Penyesuaian (edit barang)")
+        : Products.stockOut(id, Math.abs(diff), "Penyesuaian (edit barang)")));
     }
     const merged = { ...prev, ...data };
     setProducts((ps) => ps.map((p) => (p.id === id ? merged : p)));

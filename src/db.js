@@ -66,6 +66,13 @@ export const Products = {
     if (error) throw error;
     return data == null ? null : Number(data);
   },
+  // Stok KELUAR atomik: riwayat + potong batch FIFO + kolom stok dalam SATU
+  // transaksi server. Mengembalikan total HPP dari batch yang terpakai.
+  async stockOut(id, qty, note) {
+    const { data, error } = await supabase.rpc("stock_out", { p_id: id, p_qty: qty, p_note: note ?? null });
+    if (error) throw error;
+    return Number(data || 0);
+  },
   // Keluarkan stok FIFO; mengembalikan total HPP dari batch yang terpakai
   async consumeFifo(id, qty) {
     const { data, error } = await supabase.rpc("fifo_consume", { p_id: id, p_qty: qty });
