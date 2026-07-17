@@ -257,8 +257,13 @@ const PAY_METHODS = [
   { key: "qris", label: "QRIS", icon: QrCode },
   { key: "card", label: "Kartu", icon: CreditCard },
   { key: "hutang", label: "Hutang", icon: Clock },
+  { key: "split", label: "Campur", icon: Coins },
 ];
 const PAY_LABEL = Object.fromEntries(PAY_METHODS.map((m) => [m.key, m.label]));
+// Metode yang boleh dipakai dalam pembayaran campur (hutang tidak boleh dicampur)
+const SPLIT_METHODS = PAY_METHODS.filter((m) => ["cash", "transfer", "qris", "card"].includes(m.key));
+// "Tunai Rp100.000 + QRIS Rp60.000" — untuk pesan sukses & rincian
+const payListLabel = (payments) => (payments || []).map((p) => `${PAY_LABEL[p.method] || p.method} ${rp(p.amount)}`).join(" + ");
 
 const catIcon = (category = "") => {
   const c = String(category).toLowerCase();
@@ -310,8 +315,14 @@ const escposReceipt = (store, d) => {
   s += "-".repeat(W) + "\n";
   s += line("TOTAL", rp(d.total));
   if (d.kind !== "hutang") {
-    s += line("Bayar (" + d.methodLabel + ")", rp(d.paid != null ? d.paid : d.total));
-    if (d.change != null && d.change >= 0) s += line("Kembalian", rp(d.change));
+    const parts = d.paidParts || d.payments; // gross saat transaksi; net saat cetak ulang
+    if (parts && parts.length > 1) {
+      parts.forEach((p) => { s += line("Bayar " + (PAY_LABEL[p.method] || p.method), rp(p.amount)); });
+      if (d.change != null && d.change > 0) s += line("Kembalian", rp(d.change));
+    } else {
+      s += line("Bayar (" + d.methodLabel + ")", rp(d.paid != null ? d.paid : d.total));
+      if (d.change != null && d.change >= 0) s += line("Kembalian", rp(d.change));
+    }
   } else {
     if (d.settled != null) s += "-".repeat(W) + "\n" + (d.settled ? "** LUNAS **" : "** BELUM LUNAS **") + "\n";
     if (d.settled && d.paidAt) s += "Dibayar: " + d.paidAt + "\n";
@@ -500,10 +511,22 @@ function Receipt({ store, data }) {
       <div className="r-dash" />
       <div className="r-row r-total"><span>TOTAL</span><span>{rp(d.total)}</span></div>
       {d.kind !== "hutang" ? (
-        <>
-          <div className="r-row"><span>Bayar ({d.methodLabel})</span><span>{rp(d.paid != null ? d.paid : d.total)}</span></div>
-          {d.change != null && d.change >= 0 && <div className="r-row"><span>Kembalian</span><span>{rp(d.change)}</span></div>}
-        </>
+        (() => {
+          const parts = d.paidParts || d.payments; // gross saat transaksi; net saat cetak ulang
+          return parts && parts.length > 1 ? (
+            <>
+              {parts.map((p, i) => (
+                <div key={i} className="r-row"><span>Bayar ({PAY_LABEL[p.method] || p.method})</span><span>{rp(p.amount)}</span></div>
+              ))}
+              {d.change != null && d.change > 0 && <div className="r-row"><span>Kembalian</span><span>{rp(d.change)}</span></div>}
+            </>
+          ) : (
+            <>
+              <div className="r-row"><span>Bayar ({d.methodLabel})</span><span>{rp(d.paid != null ? d.paid : d.total)}</span></div>
+              {d.change != null && d.change >= 0 && <div className="r-row"><span>Kembalian</span><span>{rp(d.change)}</span></div>}
+            </>
+          );
+        })()
       ) : (
         <>
           {d.settled != null && <div className="r-stamp">{d.settled ? "** LUNAS **" : "** BELUM LUNAS **"}</div>}
@@ -846,6 +869,7 @@ export default function App() {
         ts: Date.now(), txnId: ctx.txnId || null, cashier: ctx.cashier || null, method: ctx.method || null,
         qtyLabel: it.qtyLabel || `${num(it.qty)} ${p?.unit || ""}`.trim(),
         receiptNo: ctx.receiptNo || null,
+        payments: ctx.payments || null, // rincian bayar campur (net, jumlah = total txn); null = metode tunggal
       };
       setSalesLog((sl) => [{ id: uid(), ...rec, cost: est }, ...sl]);
       // Titip jual: barang laku = muncul kewajiban setor ke distributor sebesar HPP-nya
@@ -907,12 +931,24 @@ export default function App() {
   // Ringkasan shift kasir (anti-kecurangan): transaksi kasir ini sejak login
   const buildShiftReport = () => {
     const mine = salesLog.filter((s) => s.txnId && s.cashier === cashierName && (s.ts == null || s.ts >= (shiftStart || 0)));
-    const txnIds = [...new Set(mine.map((s) => s.txnId))];
+    // Kelompokkan per transaksi supaya pembayaran campur dihitung sekali per txn,
+    // lalu pecah ke metode aslinya (bukan "Campur") agar kas laci akurat.
+    const map = {};
+    mine.forEach((s) => {
+      if (!map[s.txnId]) map[s.txnId] = { total: 0, qty: 0, method: s.method || "-", payments: null };
+      const t = map[s.txnId];
+      t.total += s.revenue; t.qty += s.qty;
+      if (!t.payments && s.payments && s.payments.length) t.payments = s.payments;
+    });
+    const txs = Object.values(map);
     const byMethod = {};
-    mine.forEach((s) => { const m = s.method || "-"; byMethod[m] = (byMethod[m] || 0) + s.revenue; });
-    const total = mine.reduce((a, s) => a + s.revenue, 0);
-    const items = mine.reduce((a, s) => a + s.qty, 0);
-    return { cashier: cashierName, start: shiftStart, count: txnIds.length, total, items, byMethod, cash: byMethod.cash || 0 };
+    txs.forEach((t) => {
+      if (t.payments) t.payments.forEach((p) => { byMethod[p.method] = (byMethod[p.method] || 0) + (Number(p.amount) || 0); });
+      else byMethod[t.method] = (byMethod[t.method] || 0) + t.total;
+    });
+    const total = txs.reduce((a, t) => a + t.total, 0);
+    const items = txs.reduce((a, t) => a + t.qty, 0);
+    return { cashier: cashierName, start: shiftStart, count: txs.length, total, items, byMethod, cash: byMethod.cash || 0 };
   };
   const requestLogout = () => {
     if (role === "cashier") setShiftReport(buildShiftReport());
@@ -1052,6 +1088,8 @@ export default function App() {
       no: no || invoiceNo(), date: nowStamp(), cashier: cashierName || "Kasir",
       items: meta.items || [], total, methodLabel: PAY_LABEL[method] || method,
       paid: meta.paid, change: meta.change,
+      payments: meta.payments || null,   // net (jumlah = total) — sama seperti yang diarsip
+      paidParts: meta.paidParts || null, // gross (yang diserahkan pelanggan) — untuk tampilan nota
       debtor: meta.debtor, business: meta.business, phone: meta.phone,
       settled: method === "hutang" ? false : undefined, // nota hutang baru = stempel BELUM LUNAS
     };
@@ -1070,6 +1108,7 @@ export default function App() {
     items: (t.items || []).map((it) => ({ name: it.name, qtyLabel: it.qtyLabel, lineTotal: it.lineTotal })),
     total: t.total, methodLabel: PAY_LABEL[t.method] || t.method || "—",
     paid: t.total, change: null,
+    payments: t.payments || null, // net dari arsip; kembalian tidak tercetak ulang
     reprint: true,
   });
 
@@ -1239,9 +1278,10 @@ export default function App() {
                 sellItems(
                   (meta.items || []).map((it) => ({ pid: it.pid, qty: it.qty, revenue: it.lineTotal, qtyLabel: it.qtyLabel })),
                   `Penjualan kasir (${PAY_LABEL[method]})`,
-                  { txnId, cashier: cashierName || "Kasir", method, receiptNo: no }
+                  { txnId, cashier: cashierName || "Kasir", method, receiptNo: no, payments: meta.payments || null }
                 );
                 if (method === "hutang") { addDebt(meta, total); flash(`Hutang ${rp(total)} dicatat — ${meta?.debtor || "Pelanggan"}`); }
+                else if (method === "split") flash(`Pembayaran ${rp(total)} campur (${payListLabel(meta.payments)}) berhasil`);
                 else flash(`Pembayaran ${rp(total)} via ${PAY_LABEL[method]} berhasil`);
                 setPrintReceipt(buildSaleReceipt(total, method, meta, no));
                 setReceiptModal(true);
@@ -1556,10 +1596,11 @@ function SalesHistory({ salesLog, products, managerMode, onPrint, onVoid }) {
     const map = {};
     salesLog.forEach((s) => {
       if (!s.txnId) return;
-      if (!map[s.txnId]) map[s.txnId] = { txnId: s.txnId, ts: s.ts, cashier: s.cashier || "—", method: s.method || "-", no: null, items: [], total: 0, qty: 0 };
+      if (!map[s.txnId]) map[s.txnId] = { txnId: s.txnId, ts: s.ts, cashier: s.cashier || "—", method: s.method || "-", payments: null, no: null, items: [], total: 0, qty: 0 };
       const t = map[s.txnId];
       t.items.push({ pid: s.productId, name: pName(s.productId), qty: s.qty, qtyLabel: s.qtyLabel || `${num(s.qty)} ${pUnit(s.productId)}`.trim(), lineTotal: s.revenue });
       t.total += s.revenue; t.qty += s.qty;
+      if (!t.payments && s.payments && s.payments.length) t.payments = s.payments;
       if (!t.no && s.receiptNo) t.no = s.receiptNo;
       if (s.ts && (!t.ts || s.ts < t.ts)) t.ts = s.ts;
     });
@@ -1578,7 +1619,10 @@ function SalesHistory({ salesLog, products, managerMode, onPrint, onVoid }) {
   const byCashier = {};
   list.forEach((t) => { byCashier[t.cashier] = (byCashier[t.cashier] || 0) + t.total; });
   const byMethod = {};
-  list.forEach((t) => { byMethod[t.method] = (byMethod[t.method] || 0) + t.total; });
+  list.forEach((t) => {
+    if (t.payments) t.payments.forEach((p) => { byMethod[p.method] = (byMethod[p.method] || 0) + (Number(p.amount) || 0); });
+    else byMethod[t.method] = (byMethod[t.method] || 0) + t.total;
+  });
 
   const fmtTime = (ts) => ts ? new Date(ts).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
 
@@ -1653,6 +1697,13 @@ function SalesHistory({ salesLog, products, managerMode, onPrint, onVoid }) {
                   {t.items.map((it, i) => (
                     <div key={i} className="txn-item"><span>{it.qtyLabel} · {it.name}</span><span className="tab">{rp(it.lineTotal)}</span></div>
                   ))}
+                  {t.payments && t.payments.length > 1 && (
+                    <div className="txn-pays">
+                      {t.payments.map((p, i) => (
+                        <div key={i} className="txn-item pay"><span>Bayar · {PAY_LABEL[p.method] || p.method}</span><span className="tab">{rp(Number(p.amount) || 0)}</span></div>
+                      ))}
+                    </div>
+                  )}
                   <div className="txn-item-foot">
                     <button className="btn ghost sm" onClick={() => onPrint(t)}><Printer size={14} /> Cetak ulang nota</button>
                     {managerMode && <button className="btn ghost sm danger-h" onClick={() => setDel(t)}><Trash2 size={14} /> Hapus transaksi</button>}
@@ -2154,14 +2205,44 @@ function Kasir({ products, onCheckout }) {
   const change = (Number(paid) || 0) - total;
   const isCash = method === "cash";
   const isHutang = method === "hutang";
-  const canPay = lines.length > 0 && (!isCash || change >= 0);
+  const isSplit = method === "split";
+
+  // ===== Pembayaran campur (split payment): beberapa metode dalam 1 transaksi =====
+  const FRESH_PARTS = [{ method: "cash", amount: "" }, { method: "qris", amount: "" }];
+  const [parts, setParts] = useState(FRESH_PARTS);
+  const setPart = (i, patch) => setParts((ps) => ps.map((p, j) => (j === i ? { ...p, ...patch } : p)));
+  const removePart = (i) => setParts((ps) => ps.filter((_, j) => j !== i));
+  const splitParts = parts.map((p) => ({ method: p.method, amount: Number(p.amount) || 0 }));
+  const splitSum = splitParts.reduce((a, p) => a + p.amount, 0);
+  const splitNonCash = splitParts.filter((p) => p.method !== "cash").reduce((a, p) => a + p.amount, 0);
+  const splitChange = Math.max(0, splitSum - total);
+  const splitChangeOk = splitNonCash <= total; // kembalian hanya boleh dari porsi tunai
+  const splitOk = splitParts.filter((p) => p.amount > 0).length >= 2 && total > 0 && splitSum >= total && splitChangeOk;
+
+  const canPay = lines.length > 0 && (isSplit ? splitOk : (!isCash || change >= 0));
 
   const checkout = () => {
     if (!canPay) return;
+    // Rincian bayar campur: paidParts = yang diserahkan (gross, untuk nota);
+    // payments = net per metode (jumlah persis = total, kembalian dipotong dari tunai) — untuk arsip & kas.
+    let splitMeta = {};
+    if (isSplit) {
+      const paidParts = splitParts.filter((p) => p.amount > 0);
+      let sisaKembalian = splitChange;
+      const merged = {};
+      paidParts.forEach((p) => {
+        let amt = p.amount;
+        if (p.method === "cash" && sisaKembalian > 0) { const cut = Math.min(amt, sisaKembalian); amt -= cut; sisaKembalian -= cut; }
+        if (amt > 0) merged[p.method] = (merged[p.method] || 0) + amt;
+      });
+      const payments = Object.entries(merged).map(([m, amount]) => ({ method: m, amount }));
+      splitMeta = { paid: splitSum, change: splitChange, payments, paidParts };
+    }
     const meta = {
       debtor: debtor.trim(), business: business.trim(), phone: phone.trim(),
       paid: isCash ? Number(paid) || total : total,
       change: isCash ? Math.max(0, change) : 0,
+      ...splitMeta,
       items: lines.map((l) => ({
         pid: l.pid,
         name: l.p.name,
@@ -2171,7 +2252,7 @@ function Kasir({ products, onCheckout }) {
       })),
     };
     onCheckout(lines.map((l) => ({ pid: l.pid, qty: l.satuan })), total, method, meta);
-    setCart({}); setPaid(""); setDebtor(""); setBusiness(""); setPhone(""); setMethod("cash");
+    setCart({}); setPaid(""); setDebtor(""); setBusiness(""); setPhone(""); setMethod("cash"); setParts(FRESH_PARTS);
   };
 
   const quickPay = [total, Math.ceil(total / 50000) * 50000, Math.ceil(total / 100000) * 100000];
@@ -2301,6 +2382,43 @@ function Kasir({ products, onCheckout }) {
 
           {(method === "transfer" || method === "qris" || method === "card") && total > 0 && (
             <div className="pay-note">Tagih <b>{rp(total)}</b> via {PAY_LABEL[method]}. Konfirmasi setelah dana masuk.</div>
+          )}
+
+          {isSplit && (
+            <div className="split-pane">
+              {parts.map((pt, i) => {
+                const others = splitParts.reduce((a, x, j) => a + (j === i ? 0 : x.amount), 0);
+                const sisa = Math.max(0, total - others);
+                return (
+                  <div key={i} className="split-row">
+                    <select className="split-select" value={pt.method} onChange={(e) => setPart(i, { method: e.target.value })}>
+                      {SPLIT_METHODS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
+                    </select>
+                    <div className="pay-row slim">
+                      <input className="pay-input" type="number" placeholder="Jumlah" value={pt.amount} onChange={(e) => setPart(i, { amount: e.target.value })} />
+                    </div>
+                    <button type="button" className="split-fill" title="Isi sisa tagihan" onClick={() => setPart(i, { amount: String(sisa) })}>sisa</button>
+                    {parts.length > 2 && <button type="button" className="icon-btn xs" onClick={() => removePart(i)}><X size={13} /></button>}
+                  </div>
+                );
+              })}
+              {parts.length < 4 && (
+                <button type="button" className="btn ghost sm split-add" onClick={() => setParts((ps) => [...ps, { method: "transfer", amount: "" }])}>
+                  <Plus size={13} /> Tambah pembayaran
+                </button>
+              )}
+              {total > 0 && (
+                splitSum < total ? (
+                  <div className="change neg"><span>Kurang</span><span className="tab">{rp(total - splitSum)}</span></div>
+                ) : !splitChangeOk ? (
+                  <div className="pay-note warn">Non-tunai <b>{rp(splitNonCash)}</b> melebihi total — kembalian hanya bisa dari porsi <b>tunai</b>.</div>
+                ) : splitChange > 0 ? (
+                  <div className="change"><span>Kembalian (dari tunai)</span><span className="tab">{rp(splitChange)}</span></div>
+                ) : (
+                  <div className="change"><span>Pas</span><span className="tab">{rp(0)}</span></div>
+                )
+              )}
+            </div>
           )}
 
           {isHutang && (
@@ -4107,6 +4225,17 @@ function Style() {
       .pay-method:hover{border-color:var(--accent);color:var(--accent)}
       .pay-method:active{transform:scale(.95)}
       .pay-method.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+      /* pembayaran campur (split payment) */
+      .split-pane{display:flex;flex-direction:column;gap:6px}
+      .split-row{display:grid;grid-template-columns:92px 1fr auto auto;gap:6px;align-items:center}
+      .split-select{border:1px solid var(--line);background:var(--surface-2);border-radius:var(--r-sm);
+        color:var(--ink);font:inherit;font-size:12.5px;font-weight:600;padding:10px 8px;outline:none}
+      .split-select:focus{border-color:var(--accent)}
+      .pay-row.slim{padding:8px 10px}
+      .split-fill{border:1px solid var(--line);background:transparent;color:var(--accent);border-radius:var(--r-sm);
+        padding:9px 10px;font:inherit;font-size:11.5px;font-weight:700;cursor:pointer;transition:border-color .15s}
+      .split-fill:hover{border-color:var(--accent)}
+      .split-add{align-self:flex-start}
       .pay-note{font-size:12.5px;color:var(--ink-soft);background:var(--surface-2);border-radius:9px;padding:9px 12px;line-height:1.45}
       .pay-note b{color:var(--ink)}
       .pay-note.warn{background:var(--warn-bg);color:var(--warn)} .pay-note.warn b{color:var(--warn)}
@@ -4166,6 +4295,9 @@ function Style() {
         background:var(--surface);border:1px solid var(--line);padding:2px 8px;border-radius:999px;white-space:nowrap}
       .txn-method.m-cash{color:var(--ok);background:var(--ok-bg);border-color:transparent}
       .txn-method.m-order{color:var(--teal);background:var(--teal-soft);border-color:transparent}
+      .txn-method.m-split{color:var(--gold);background:rgba(224,165,60,.14);border-color:transparent}
+      .txn-pays{border-top:1px dashed var(--line);margin-top:4px;padding-top:4px}
+      .txn-item.pay span:first-child{color:var(--ink-faint);font-size:12px}
       .txn-qty{font-size:12px;color:var(--ink-faint);white-space:nowrap}
       .txn-total{font-family:'Space Grotesk';font-weight:700;font-size:14px;white-space:nowrap}
       .txn-caret{color:var(--ink-faint);transition:transform .18s var(--ease)}

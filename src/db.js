@@ -211,6 +211,7 @@ export const Sales = {
       date: r.date, ts: r.created_at ? Date.parse(r.created_at) : null,
       txnId: r.txn_id || null, cashier: r.cashier || null, method: r.method || null,
       qtyLabel: r.qty_label || null, receiptNo: r.receipt_no || null,
+      payments: r.payments || null, // rincian bayar campur [{method, amount}] — null = metode tunggal
     }));
   },
   async create(s) {
@@ -218,6 +219,7 @@ export const Sales = {
       product_id: s.productId, qty: s.qty, revenue: s.revenue, cost: s.cost, date: s.date,
       txn_id: s.txnId || null, cashier: s.cashier || null, method: s.method || null,
       qty_label: s.qtyLabel || null, receipt_no: s.receiptNo || null,
+      payments: s.payments || null,
     });
     if (error) throw error;
   },
