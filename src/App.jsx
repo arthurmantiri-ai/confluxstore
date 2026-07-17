@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { hasSupabase } from "./supabaseClient";
-import { Products, Batches, Movements, Orders as OrdersApi, Debts as DebtsApi, Capital, Expenses, Sales, Consign, Settings as SettingsApi, Auth, Profiles } from "./db";
+import { Products, Batches, Movements, Orders as OrdersApi, Debts as DebtsApi, Capital, Expenses, Sales, Consign, Settings as SettingsApi, Auth, Profiles, Shifts } from "./db";
 import {
   LayoutDashboard, Package, ShoppingCart, Globe, RefreshCcw,
   Plus, Minus, Search, X, Check, TrendingUp, ArrowUpRight, ArrowDownRight,
@@ -52,14 +52,15 @@ const prevPeriod = (ym) => { const [y, m] = String(ym).split("-").map(Number); c
 // Simpan sesi kasir (nama + jam mulai shift) di perangkat agar pulih otomatis
 // setelah reload pada HARI yang sama. Beda hari atau beda akun -> shift baru.
 const CASHIER_KEY = "conflux.cashier";
-const saveCashierSession = (name, start, uid) => {
-  try { localStorage.setItem(CASHIER_KEY, JSON.stringify({ name, start, uid: uid || null, day: new Date(start).toDateString() })); } catch (e) {}
+const saveCashierSession = (name, start, uid, shiftId) => {
+  try { localStorage.setItem(CASHIER_KEY, JSON.stringify({ name, start, uid: uid || null, shiftId: shiftId || null, day: new Date(start).toDateString() })); } catch (e) {}
 };
 const loadCashierSession = (uid) => {
   try {
     const raw = localStorage.getItem(CASHIER_KEY); if (!raw) return null;
     const o = JSON.parse(raw);
     if (!o || !o.name || !o.start) return null;
+    if (!o.shiftId) return null;                            // format lama (pra sistem shift) -> buka shift baru
     if (uid && o.uid && o.uid !== uid) return null;        // akun berbeda
     if (o.day !== new Date().toDateString()) return null;   // hari berbeda -> mulai shift baru
     return o;
@@ -249,6 +250,7 @@ const NAV = [
   { key: "simulasi", label: "Simulasi Stok", icon: Calculator, roles: ["manager"] },
   { key: "akuntansi", label: "Akuntansi", icon: LineChart, roles: ["manager"] },
   { key: "riwayat", label: "Riwayat Penjualan", icon: History, roles: ["cashier", "manager"] },
+  { key: "shiftlog", label: "Shift Kasir", icon: Wallet, roles: ["manager"] },
 ];
 
 const PAY_METHODS = [
@@ -548,9 +550,10 @@ function RoleGate({ onEnter, pin: managerPin }) {
   const [mode, setMode] = useState(null); // null | "cashier" | "manager"
   const [pin, setPin] = useState("");
   const [name, setName] = useState("");
+  const [opening, setOpening] = useState(""); // modal awal kas di laci (wajib saat buka shift)
   const [err, setErr] = useState(false);
   const submit = () => { if (pin === (managerPin || MANAGER_PIN)) onEnter("manager"); else setErr(true); };
-  const enterCashier = () => { if (name.trim()) onEnter("cashier", name.trim()); };
+  const enterCashier = () => { if (name.trim() && opening !== "") onEnter("cashier", name.trim(), Number(String(opening).replace(/\D/g, "")) || 0); };
 
   return (
     <div className="gate">
@@ -599,11 +602,18 @@ function RoleGate({ onEnter, pin: managerPin }) {
               value={name} onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") enterCashier(); }}
             />
+            <div className="gate-pin-label" style={{ marginTop: 10 }}><Banknote size={15} /> Modal awal kas di laci (Rp)</div>
+            <input
+              className="pin-input" inputMode="numeric" placeholder="cth. 200.000"
+              value={opening} onChange={(e) => setOpening(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") enterCashier(); }}
+            />
+            {opening !== "" && <div className="pin-hint">Terbaca: <b>{rp(Number(String(opening).replace(/\D/g, "")) || 0)}</b></div>}
             <div className="gate-pin-actions">
-              <button className="btn ghost" onClick={() => { setMode(null); setName(""); }}>Kembali</button>
-              <button className="btn" disabled={!name.trim()} onClick={enterCashier}><ArrowRight size={15} /> Masuk</button>
+              <button className="btn ghost" onClick={() => { setMode(null); setName(""); setOpening(""); }}>Kembali</button>
+              <button className="btn" disabled={!name.trim() || opening === ""} onClick={enterCashier}><ArrowRight size={15} /> Buka Shift</button>
             </div>
-            <div className="pin-hint">Nama ini menempel pada setiap transaksi & struk Anda.</div>
+            <div className="pin-hint">Hitung uang fisik di laci sebelum mulai — jumlah ini menjadi dasar cocokan kas saat shift ditutup.</div>
           </div>
         ) : (
           <div className="gate-pin">
@@ -703,22 +713,36 @@ function Login({ flash }) {
 
 function CashierNameGate({ onEnter, onBack }) {
   const [name, setName] = useState("");
+  const [opening, setOpening] = useState(""); // modal awal kas (wajib)
+  const [busy, setBusy] = useState(false);
+  const openVal = Number(String(opening).replace(/\D/g, "")) || 0;
+  const ready = name.trim() && opening !== "" && !busy;
+  const go = async () => {
+    if (!ready) return;
+    setBusy(true);
+    try { await onEnter(name.trim(), openVal); } catch (e) { console.error(e); }
+    setBusy(false);
+  };
   return (
     <div className="gate">
       <GateBg />
       <div className="gate-card">
         <div className="gate-logo-ring"><img className="gate-logo" src={LOGO} alt="Conflux" /></div>
         <div className="gate-title">CONFLUX</div>
-        <div className="gate-sub">Coffee Club · Kasir</div>
+        <div className="gate-sub">Coffee Club · Buka Shift Kasir</div>
         <div className="gate-pin">
           <div className="gate-pin-label"><User size={15} /> Nama kasir hari ini</div>
           <input className="pin-input" autoFocus value={name} placeholder="cth. Rani"
-            onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) onEnter(name.trim()); }} />
+            onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") go(); }} />
+          <div className="gate-pin-label" style={{ marginTop: 10 }}><Banknote size={15} /> Modal awal kas di laci (Rp)</div>
+          <input className="pin-input" inputMode="numeric" value={opening} placeholder="cth. 200.000"
+            onChange={(e) => setOpening(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") go(); }} />
+          {opening !== "" && <div className="pin-hint">Terbaca: <b>{rp(openVal)}</b></div>}
           <div className="gate-pin-actions">
-            <button className="btn ghost" onClick={onBack}>Keluar</button>
-            <button className="btn" disabled={!name.trim()} onClick={() => onEnter(name.trim())}><ArrowRight size={15} /> Mulai</button>
+            <button className="btn ghost" disabled={busy} onClick={onBack}>Keluar</button>
+            <button className="btn" disabled={!ready} onClick={go}><ArrowRight size={15} /> {busy ? "Membuka…" : "Buka Shift"}</button>
           </div>
-          <div className="pin-hint">Nama ini menempel pada setiap transaksi & struk Anda.</div>
+          <div className="pin-hint">Hitung uang fisik di laci sebelum mulai. Nama & modal awal terkunci ke shift ini dan tidak bisa diubah.</div>
         </div>
       </div>
     </div>
@@ -742,8 +766,12 @@ export default function App() {
   const [role, setRole] = useState(null); // null = belum login, "cashier" | "manager"
   const [cashierName, setCashierName] = useState("");
   const [shiftStart, setShiftStart] = useState(null);
-  const [shiftReport, setShiftReport] = useState(null);
+  const [shiftReport, setShiftReport] = useState(null); // { stage: "count" | "result", report, shift }
   const [shiftCash, setShiftCash] = useState("");
+  const [shiftNote, setShiftNote] = useState("");
+  const [shift, setShift] = useState(null); // shift kasir aktif (baris DB / objek lokal)
+  const [shiftCashMoves, setShiftCashMoves] = useState([]); // kas laci non-penjualan (mode lokal)
+  const [closingBusy, setClosingBusy] = useState(false);
   const [btName, setBtName] = useState("");
   const managerMode = role === "manager";
   const [store, setStore] = useState(DEFAULT_STORE);
@@ -803,7 +831,18 @@ export default function App() {
         if (r === "manager") { setRole("manager"); setCashierName(prof?.name || "Manajer"); setView("dashboard"); setShiftStart(Date.now()); }
         else {
           const saved = loadCashierSession(uid);
-          if (saved) { setRole("cashier"); setCashierName(saved.name); setShiftStart(saved.start); setView("kasir"); }
+          if (saved) {
+            // Validasi ke server: kalau shift ternyata sudah ditutup (mis. oleh manajer),
+            // sesi lokal dibuang dan kasir harus buka shift baru dengan modal awal baru.
+            let sh = null, checked = false;
+            try { sh = await Shifts.get(saved.shiftId); checked = true; }
+            catch (e) { console.error("[shift]", e); }
+            if (sh && sh.status === "open") {
+              setShift(sh); setShiftCashMoves([]);
+              setRole("cashier"); setCashierName(saved.name); setShiftStart(sh.openedAt || saved.start); setView("kasir");
+            } else if (checked) { clearCashierSession(); }
+            // gagal cek (offline sesaat): jangan hapus sesi — gate tampil, reload berikutnya dicoba lagi
+          }
         }
       } catch (e) { console.error("[profile]", e); setProfileRole("cashier"); }
       setAuthReady(true);
@@ -827,6 +866,7 @@ export default function App() {
   // Solusi: tarik ulang daftar produk saat tab kembali aktif, berkala tiap 2 menit,
   // dan (dipanggil manual) setelah transaksi/pembatalan.
   const lastProdRefreshRef = useRef(0);
+  const pendingSyncRef = useRef(0); // jumlah batch penjualan yang masih dikirim ke server
   const refreshProducts = async (force = false) => {
     if (!hasSupabase || !session) return;
     const now = Date.now();
@@ -896,6 +936,7 @@ export default function App() {
       const rec = {
         productId: it.pid, qty: it.qty, revenue: it.revenue, date: "Hari ini",
         ts: Date.now(), txnId: ctx.txnId || null, cashier: ctx.cashier || null, method: ctx.method || null,
+        shiftId: ctx.shiftId || null, // audit: transaksi menempel ke shift kasir yang sedang buka
         qtyLabel: it.qtyLabel || `${num(it.qty)} ${p?.unit || ""}`.trim(),
         receiptNo: ctx.receiptNo || null,
         payments: ctx.payments || null, // rincian bayar campur (net, jumlah = total txn); null = metode tunggal
@@ -927,7 +968,9 @@ export default function App() {
       // Dulu tiap item fire-and-forget dengan toast kecil yang mudah terlewat.
       // Sekarang: tunggu semuanya, umumkan kegagalan dengan jelas, lalu tarik
       // angka stok yang sesungguhnya dari database supaya layar = kenyataan.
+      pendingSyncRef.current += 1;
       Promise.allSettled(jobs).then((rs) => {
+        pendingSyncRef.current = Math.max(0, pendingSyncRef.current - 1);
         const failed = rs.filter((r) => r.status === "rejected");
         if (failed.length) {
           console.error("[sync]", failed.map((f) => f.reason));
@@ -969,11 +1012,13 @@ export default function App() {
     flash("Setoran ke distributor dicatat lunas");
   };
 
-  const logout = () => { if (hasSupabase) Auth.signOut(); clearCashierSession(); setRole(null); setSidebarOpen(false); setShiftReport(null); setCashierName(""); loadedRef.current = false; };
+  const logout = () => { if (hasSupabase) Auth.signOut(); clearCashierSession(); setRole(null); setSidebarOpen(false); setShiftReport(null); setShift(null); setShiftCashMoves([]); setShiftCash(""); setShiftNote(""); setCashierName(""); loadedRef.current = false; };
 
   // Ringkasan shift kasir (anti-kecurangan): transaksi kasir ini sejak login
   const buildShiftReport = () => {
-    const mine = salesLog.filter((s) => s.txnId && s.cashier === cashierName && (s.ts == null || s.ts >= (shiftStart || 0)));
+    const mine = salesLog.filter((s) => s.txnId && (shift?.id
+      ? s.shiftId === shift.id
+      : (s.cashier === cashierName && (s.ts == null || s.ts >= (shiftStart || 0)))));
     // Kelompokkan per transaksi supaya pembayaran campur dihitung sekali per txn,
     // lalu pecah ke metode aslinya (bukan "Campur") agar kas laci akurat.
     const map = {};
@@ -994,8 +1039,40 @@ export default function App() {
     return { cashier: cashierName, start: shiftStart, count: txs.length, total, items, byMethod, cash: byMethod.cash || 0 };
   };
   const requestLogout = () => {
-    if (role === "cashier") setShiftReport(buildShiftReport());
+    // Kasir tidak bisa keluar begitu saja: WAJIB tutup shift dengan hitungan kas fisik.
+    if (role === "cashier") { setShiftCash(""); setShiftNote(""); setShiftReport({ stage: "count", report: buildShiftReport() }); }
     else logout();
+  };
+
+  // ===== Tutup shift (blind count) =====
+  // Kasir mengetik jumlah uang fisik DULU tanpa pernah melihat "seharusnya berapa".
+  // Server (close_shift) menghitung penjualan tunai + kas lain-lain shift ini,
+  // MENGUNCI hasilnya, baru selisih ditampilkan. Kasir yang jujur tidak terganggu;
+  // yang berniat curang tidak bisa lagi "menyesuaikan" angka dengan layar.
+  const submitCloseShift = async () => {
+    if (!shiftReport || shiftReport.stage !== "count" || closingBusy) return;
+    if (shiftCash === "") { flash("Isi dulu jumlah uang tunai hasil hitungan fisik"); return; }
+    const counted = Number(String(shiftCash).replace(/\D/g, "")) || 0;
+    setClosingBusy(true);
+    try {
+      // beri kesempatan transaksi terakhir selesai tersimpan (maks ~4 detik)
+      for (let i = 0; i < 20 && pendingSyncRef.current > 0; i++) await new Promise((r) => setTimeout(r, 200));
+      let closed = null;
+      if (hasSupabase && shift?.id) {
+        closed = await Shifts.close(shift.id, counted, (shiftNote || "").trim() || null);
+      } else {
+        const cash = (shiftReport.report?.byMethod?.cash) || 0;
+        const moves = shiftCashMoves.reduce((a, m) => a + (m.type === "in" ? m.amount : -m.amount), 0);
+        const expected = (shift?.openingCash || 0) + cash + moves;
+        closed = { ...(shift || {}), status: "closed", closedAt: Date.now(), cashSales: cash, cashMoves: moves, expectedCash: expected, closingCash: counted, variance: counted - expected, note: (shiftNote || "").trim() || null };
+      }
+      setShiftReport((r) => ({ ...r, stage: "result", shift: closed }));
+      setShift((sh) => (sh ? { ...sh, status: "closed" } : sh));
+    } catch (e) {
+      console.error("[shift]", e);
+      flash("Gagal menutup shift — periksa koneksi lalu coba lagi");
+    }
+    setClosingBusy(false);
   };
 
   const addProduct = async (data) => {
@@ -1088,9 +1165,21 @@ export default function App() {
       return [debt, ...ds];
     });
   };
-  const settleDebt = (id) => {
-    setDebts((ds) => ds.map((d) => (d.id === id ? { ...d, status: "lunas", paidAt: today } : d)));
-    persist(() => DebtsApi.settle(id, today));
+  const settleDebt = (id, method = "cash") => {
+    const d = debts.find((x) => x.id === id);
+    setDebts((ds) => ds.map((x) => (x.id === id ? { ...x, status: "lunas", paidAt: today, paidMethod: method } : x)));
+    persist(() => DebtsApi.settle(id, today, method));
+    // Pelunasan bon TUNAI = uang masuk laci. Tanpa pencatatan ini, kas fisik akan
+    // "lebih" dari hitungan sistem saat tutup shift dan selisihnya bisa dikantongi
+    // tanpa ketahuan. Dicatat ke shift yang sedang buka (server ikut menghitungnya
+    // dalam "seharusnya di laci").
+    if (method === "cash" && role === "cashier" && shift?.id) {
+      const amt = Number(d?.total) || 0;
+      if (amt > 0) {
+        setShiftCashMoves((ms) => [...ms, { type: "in", amount: amt, note: `Pelunasan bon ${id}` }]);
+        if (hasSupabase) persist(() => Shifts.cashMove(shift.id, "in", amt, `Pelunasan bon ${id}`));
+      }
+    }
     flash("Hutang ditandai lunas");
   };
   const deleteDebt = (id) => {
@@ -1218,7 +1307,7 @@ export default function App() {
       return (
         <>
           <Style />
-          <RoleGate onEnter={(r, name) => { const start = Date.now(); setRole(r); setView(r === "manager" ? "dashboard" : "kasir"); setCashierName(r === "manager" ? "Manajer" : (name || "Kasir")); setShiftStart(start); if (r === "cashier") saveCashierSession(name || "Kasir", start, null); }} pin={store.pin || MANAGER_PIN} />
+          <RoleGate onEnter={(r, name, opening) => { const start = Date.now(); setRole(r); setView(r === "manager" ? "dashboard" : "kasir"); setCashierName(r === "manager" ? "Manajer" : (name || "Kasir")); setShiftStart(start); if (r === "cashier") { const sh = { id: uid(), cashier: name || "Kasir", status: "open", openedAt: start, openingCash: Number(opening) || 0 }; setShift(sh); setShiftCashMoves([]); saveCashierSession(name || "Kasir", start, null, sh.id); } }} pin={store.pin || MANAGER_PIN} />
         </>
       );
     }
@@ -1230,7 +1319,16 @@ export default function App() {
         <>
           <Style />
           <CashierNameGate
-            onEnter={(name) => { const start = Date.now(); setRole("cashier"); setCashierName(name || "Kasir"); setShiftStart(start); setView("kasir"); saveCashierSession(name || "Kasir", start, session?.user?.id); }}
+            onEnter={async (name, opening) => {
+              // Shift dibuka DI SERVER: user_id, jam buka, dan modal awal tercatat permanen
+              // (baris shift tidak bisa diubah/dihapus dari klien — hanya RPC).
+              let sh = null;
+              try { sh = await Shifts.open(name || "Kasir", Number(opening) || 0); }
+              catch (e) { console.error("[shift]", e); flash("Gagal membuka shift — periksa koneksi lalu coba lagi"); return; }
+              setShift(sh); setShiftCashMoves([]);
+              setRole("cashier"); setCashierName(sh.cashier); setShiftStart(sh.openedAt || Date.now()); setView("kasir");
+              saveCashierSession(sh.cashier, sh.openedAt || Date.now(), session?.user?.id, sh.id);
+            }}
             onBack={() => { clearCashierSession(); Auth.signOut(); }}
           />
         </>
@@ -1314,6 +1412,7 @@ export default function App() {
               onVoid={voidTxn}
             />
           )}
+          {view === "shiftlog" && managerMode && <ShiftLog flash={flash} />}
           {view === "stok" && (
             <Inventory products={products} movements={movements} pById={pById}
               onMove={(pid, type, qty, note, cost) => { recordMovement(pid, type, qty, note, cost); flash(`Stok ${type === "in" ? "masuk" : "keluar"} dicatat`); }}
@@ -1328,7 +1427,7 @@ export default function App() {
                 sellItems(
                   (meta.items || []).map((it) => ({ pid: it.pid, qty: it.qty, revenue: it.lineTotal, qtyLabel: it.qtyLabel })),
                   `Penjualan kasir (${PAY_LABEL[method]})`,
-                  { txnId, cashier: cashierName || "Kasir", method, receiptNo: no, payments: meta.payments || null }
+                  { txnId, cashier: cashierName || "Kasir", method, receiptNo: no, payments: meta.payments || null, shiftId: shift?.id || null }
                 );
                 if (method === "hutang") { addDebt(meta, total); flash(`Hutang ${rp(total)} dicatat — ${meta?.debtor || "Pelanggan"}`); }
                 else if (method === "split") flash(`Pembayaran ${rp(total)} campur (${payListLabel(meta.payments)}) berhasil`);
@@ -1347,7 +1446,7 @@ export default function App() {
                 sellItems(
                   o.items.map((it) => { const p = pById(it.pid); return { pid: it.pid, qty: it.qty, revenue: (p?.price || 0) * it.qty }; }),
                   `Order ${o.id}`,
-                  { txnId, cashier: "Order Online", method: "order", receiptNo: o.id }
+                  { txnId, cashier: "Order Online", method: "order", receiptNo: o.id, shiftId: shift?.id || null }
                 );
                 flash(`${o.id} diterima & stok dipotong`);
               }}
@@ -1480,50 +1579,88 @@ export default function App() {
 
       <Modal
         open={!!shiftReport}
-        onClose={() => setShiftReport(null)}
+        onClose={() => {
+          if (!shiftReport) return;
+          if (shiftReport.stage === "result") logout();            // hasil sudah terkunci — keluar
+          else if (!closingBusy) setShiftReport(null);             // batal: shift tetap berjalan
+        }}
         width={460}
-        title="Ringkasan Shift Kasir"
-        footer={<>
-          <button className="btn ghost" onClick={() => setShiftReport(null)}>Batal</button>
-          <button className="btn" onClick={() => { setShiftCash(""); logout(); }}><LogOut size={15} /> Keluar</button>
-        </>}
+        title={shiftReport?.stage === "result" ? "Shift Ditutup" : "Tutup Shift"}
+        footer={shiftReport?.stage === "result" ? (
+          <button className="btn" onClick={logout}><LogOut size={15} /> Selesai & Keluar</button>
+        ) : (
+          <>
+            <button className="btn ghost" disabled={closingBusy} onClick={() => setShiftReport(null)}>Batal</button>
+            <button className="btn" disabled={closingBusy || shiftCash === ""} onClick={submitCloseShift}><Lock size={15} /> {closingBusy ? "Menutup…" : "Tutup Shift"}</button>
+          </>
+        )}
       >
-        {shiftReport && (() => {
-          const counted = Number(String(shiftCash).replace(/\D/g, "")) || 0;
-          const selisih = counted - shiftReport.cash;
+        {/* Tahap 1 — hitung buta (blind count): TIDAK ada angka penjualan/ekspektasi
+            yang tampil sebelum hitungan fisik dikunci, supaya kasir tidak bisa
+            sekadar mengetik angka yang "pas". */}
+        {shiftReport && shiftReport.stage === "count" && (
+          <div className="shift">
+            <div className="shift-head">
+              <div className="shift-ava">{((shiftReport.report?.cashier || "?")[0] || "?").toUpperCase()}</div>
+              <div>
+                <div className="shift-name">{shiftReport.report?.cashier}</div>
+                <div className="muted xs">Buka {shift?.openedAt ? new Date(shift.openedAt).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }) : "—"} · Modal awal {rp(shift?.openingCash || 0)}</div>
+              </div>
+            </div>
+            <div className="shift-stats">
+              <div className="shift-stat"><span>Transaksi</span><b>{shiftReport.report?.count ?? 0}</b></div>
+              <div className="shift-stat"><span>Barang</span><b>{shiftReport.report?.items ?? 0}</b></div>
+            </div>
+            <div className="shift-recon">
+              <label className="fld"><span>Uang tunai di laci sekarang — hitung fisik, termasuk modal awal</span>
+                <input inputMode="numeric" autoFocus value={shiftCash} placeholder="cth. 750.000"
+                  onChange={(e) => setShiftCash(e.target.value)} /></label>
+              {shiftCash !== "" && <div className="muted xs">Terbaca: <b>{rp(Number(String(shiftCash).replace(/\D/g, "")) || 0)}</b></div>}
+              <label className="fld"><span>Catatan (opsional)</span>
+                <input value={shiftNote} placeholder="cth. Rp20.000 dipakai beli galon aqua"
+                  onChange={(e) => setShiftNote(e.target.value)} /></label>
+            </div>
+            <div className="muted xs">Sistem mencocokkan hitungan Anda dengan catatan penjualan SETELAH angka dikunci — hitung dengan teliti.</div>
+          </div>
+        )}
+        {/* Tahap 2 — hasil dari server: selisih tercatat permanen */}
+        {shiftReport && shiftReport.stage === "result" && (() => {
+          const c = shiftReport.shift || {};
+          const v = Number(c.variance || 0);
           return (
             <div className="shift">
               <div className="shift-head">
-                <div className="shift-ava">{(shiftReport.cashier[0] || "?").toUpperCase()}</div>
+                <div className="shift-ava">{((c.cashier || "?")[0] || "?").toUpperCase()}</div>
                 <div>
-                  <div className="shift-name">{shiftReport.cashier}</div>
-                  <div className="muted xs">Sesi sejak {shiftReport.start ? new Date(shiftReport.start).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }) : "—"}</div>
+                  <div className="shift-name">{c.cashier}</div>
+                  <div className="muted xs">
+                    {c.openedAt ? new Date(c.openedAt).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }) : "—"}
+                    {" – "}
+                    {c.closedAt ? new Date(c.closedAt).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }) : "—"}
+                  </div>
                 </div>
               </div>
-              <div className="shift-stats">
-                <div className="shift-stat"><span>Transaksi</span><b>{shiftReport.count}</b></div>
-                <div className="shift-stat"><span>Barang</span><b>{shiftReport.items}</b></div>
-                <div className="shift-stat"><span>Total</span><b>{rp(shiftReport.total)}</b></div>
+              <div className="shift-recon">
+                <div className="shift-row"><span>Modal awal</span><span className="tab">{rp(c.openingCash || 0)}</span></div>
+                <div className="shift-row"><span>Penjualan tunai</span><span className="tab">{rp(c.cashSales || 0)}</span></div>
+                {Number(c.cashMoves || 0) !== 0 && (
+                  <div className="shift-row"><span>Kas lain-lain (bon tunai dll)</span><span className="tab">{rp(c.cashMoves || 0)}</span></div>
+                )}
+                <div className="shift-row strong"><span>Seharusnya di laci</span><span className="tab">{rp(c.expectedCash || 0)}</span></div>
+                <div className="shift-row"><span>Hasil hitungan Anda</span><span className="tab">{rp(c.closingCash || 0)}</span></div>
+                <div className={`shift-diff ${v === 0 ? "ok" : v > 0 ? "over" : "short"}`}>
+                  {v === 0 ? "PAS ✓" : v > 0 ? `Lebih ${rp(v)}` : `Kurang ${rp(Math.abs(v))}`}
+                </div>
               </div>
-              {Object.keys(shiftReport.byMethod).length > 0 && (
+              {shiftReport.report && Object.keys(shiftReport.report.byMethod || {}).length > 0 && (
                 <div className="shift-methods">
-                  {Object.entries(shiftReport.byMethod).map(([m, v]) => (
-                    <div key={m} className="shift-row"><span>{PAY_LABEL[m] || m}</span><span className="tab">{rp(v)}</span></div>
+                  {Object.entries(shiftReport.report.byMethod).map(([m, val]) => (
+                    <div key={m} className="shift-row"><span>{PAY_LABEL[m] || m}</span><span className="tab">{rp(val)}</span></div>
                   ))}
                 </div>
               )}
-              <div className="shift-recon">
-                <div className="shift-row strong"><span>Tunai diharapkan di laci</span><span className="tab">{rp(shiftReport.cash)}</span></div>
-                <label className="fld"><span>Tunai dihitung (opsional)</span>
-                  <input inputMode="numeric" value={shiftCash} placeholder="hitung uang fisik di laci"
-                    onChange={(e) => setShiftCash(e.target.value)} /></label>
-                {shiftCash !== "" && (
-                  <div className={`shift-diff ${selisih === 0 ? "ok" : selisih > 0 ? "over" : "short"}`}>
-                    {selisih === 0 ? "Cocok ✓" : selisih > 0 ? `Lebih ${rp(selisih)}` : `Kurang ${rp(Math.abs(selisih))}`}
-                  </div>
-                )}
-              </div>
-              <div className="muted xs">Catat selisih untuk serah terima. Manajer melihat seluruh transaksi di menu Riwayat Penjualan.</div>
+              {c.note && <div className="muted xs">Catatan: {c.note}</div>}
+              <div className="muted xs">Hasil cocokan tersimpan permanen dan terlihat manajer di menu Shift Kasir.</div>
             </div>
           );
         })()}
@@ -2679,9 +2816,130 @@ function OrderForm({ products, onClose, onSave }) {
 
 /* ============================ Hutang ============================ */
 
+/* ============================ Shift Kasir (manajer) ============================ */
+// Buku cocokan kas per shift: modal awal, penjualan tunai, seharusnya vs dihitung,
+// dan selisihnya — permanen, tidak bisa diubah/dihapus dari aplikasi. Shift yang
+// lupa ditutup kasir bisa ditutup paksa oleh manajer di sini.
+function ShiftLog({ flash }) {
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState(false);
+  const [fc, setFc] = useState(null);      // shift yang akan ditutup paksa
+  const [fcCash, setFcCash] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = async () => {
+    setErr(false);
+    try { setRows(await Shifts.list(120)); }
+    catch (e) { console.error("[shiftlog]", e); setErr(true); setRows([]); }
+  };
+  useEffect(() => { if (hasSupabase) load(); else setRows([]); }, []);
+
+  const list = rows || [];
+  const openShifts = list.filter((x) => x.status === "open");
+  const cut = Date.now() - 30 * 86400000;
+  const last30 = list.filter((x) => x.status === "closed" && (x.closedAt || 0) >= cut);
+  const short30 = last30.reduce((a, x) => a + Math.min(0, Number(x.variance || 0)), 0);
+  const over30 = last30.reduce((a, x) => a + Math.max(0, Number(x.variance || 0)), 0);
+  const fmtD = (t) => (t ? new Date(t).toLocaleDateString("id-ID", { day: "numeric", month: "short" }) : "—");
+  const fmtT = (t) => (t ? new Date(t).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }) : "—");
+
+  const forceClose = async () => {
+    if (!fc || fcCash === "" || busy) return;
+    const counted = Number(String(fcCash).replace(/\D/g, "")) || 0;
+    setBusy(true);
+    try {
+      await Shifts.close(fc.id, counted, "Ditutup manajer");
+      setFc(null); setFcCash("");
+      await load();
+      flash("Shift ditutup oleh manajer");
+    } catch (e) { console.error("[shiftlog]", e); flash("Gagal menutup shift — cek koneksi"); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="stack">
+      <div className="grid-4">
+        <Stat icon={Clock} accent label="Shift terbuka" value={num(openShifts.length)} sub="sedang berjalan" />
+        <Stat icon={Wallet} label="Shift tercatat" value={num(list.length)} sub="120 terakhir" />
+        <Stat icon={AlertTriangle} label="Kurang (30 hari)" value={rp(Math.abs(short30))} sub="total kas kurang" />
+        <Stat icon={CheckCircle2} label="Lebih (30 hari)" value={rp(over30)} sub="total kas lebih" />
+      </div>
+
+      <div className="slog-head">
+        <div className="muted xs">Selisih <b>kurang</b> berulang pada kasir yang sama adalah sinyal paling penting untuk ditindaklanjuti.</div>
+        <button className="btn ghost sm" onClick={load}><RefreshCcw size={14} /> Muat ulang</button>
+      </div>
+
+      {rows === null && <div className="muted">Memuat…</div>}
+      {rows !== null && err && <div className="muted">Gagal memuat data shift — coba muat ulang.</div>}
+      {rows !== null && !err && list.length === 0 && (
+        <div className="muted">Belum ada shift tercatat. Shift pertama muncul setelah kasir login dan mengisi modal awal kas.</div>
+      )}
+
+      <div className="slog-list">
+        {list.map((x) => {
+          const v = Number(x.variance || 0);
+          return (
+            <div key={x.id} className="slog-card">
+              <div className="slog-top">
+                <div className="slog-who">
+                  <div className="shift-ava">{((x.cashier || "?")[0] || "?").toUpperCase()}</div>
+                  <div>
+                    <div className="slog-name">{x.cashier}</div>
+                    <div className="muted xs">{fmtD(x.openedAt)} · {fmtT(x.openedAt)} – {x.status === "open" ? "…" : fmtT(x.closedAt)}</div>
+                  </div>
+                </div>
+                {x.status === "open"
+                  ? <span className="slog-badge open">BERJALAN</span>
+                  : <span className={`slog-badge ${v === 0 ? "ok" : v > 0 ? "over" : "short"}`}>{v === 0 ? "PAS" : v > 0 ? `+${rp(v)}` : `−${rp(Math.abs(v))}`}</span>}
+              </div>
+              <div className="slog-rows">
+                <div className="shift-row"><span>Modal awal</span><span className="tab">{rp(x.openingCash || 0)}</span></div>
+                {x.status === "closed" && (
+                  <>
+                    <div className="shift-row"><span>Penjualan tunai</span><span className="tab">{rp(x.cashSales || 0)}</span></div>
+                    {Number(x.cashMoves || 0) !== 0 && <div className="shift-row"><span>Kas lain-lain</span><span className="tab">{rp(x.cashMoves || 0)}</span></div>}
+                    <div className="shift-row strong"><span>Seharusnya</span><span className="tab">{rp(x.expectedCash || 0)}</span></div>
+                    <div className="shift-row"><span>Dihitung kasir</span><span className="tab">{rp(x.closingCash || 0)}</span></div>
+                  </>
+                )}
+                {x.note && <div className="muted xs">Catatan: {x.note}</div>}
+              </div>
+              {x.status === "open" && (
+                <div className="slog-actions">
+                  <button className="btn ghost sm" onClick={() => { setFcCash(""); setFc(x); }}><Lock size={14} /> Tutup paksa</button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <Modal
+        open={!!fc}
+        onClose={() => { if (!busy) setFc(null); }}
+        title="Tutup shift (manajer)"
+        footer={<>
+          <button className="btn ghost" disabled={busy} onClick={() => setFc(null)}>Batal</button>
+          <button className="btn" disabled={busy || fcCash === ""} onClick={forceClose}><Lock size={15} /> {busy ? "Menutup…" : "Tutup Shift"}</button>
+        </>}
+      >
+        {fc && (
+          <>
+            <p className="confirm-text">Tutup shift <b>{fc.cashier}</b> ({fmtD(fc.openedAt)} · buka {fmtT(fc.openedAt)})? Hitung uang fisik di laci lalu masukkan jumlahnya.</p>
+            <label className="fld"><span>Uang tunai di laci (termasuk modal awal)</span>
+              <input inputMode="numeric" autoFocus value={fcCash} placeholder="cth. 750.000" onChange={(e) => setFcCash(e.target.value)} /></label>
+            {fcCash !== "" && <div className="muted xs">Terbaca: <b>{rp(Number(String(fcCash).replace(/\D/g, "")) || 0)}</b></div>}
+          </>
+        )}
+      </Modal>
+    </div>
+  );
+}
+
 function Debts({ debts, onSettle, onPrint, onDelete }) {
   const [tab, setTab] = useState("belum");
   const [confirm, setConfirm] = useState(null);
+  const [payMode, setPayMode] = useState("cash"); // tunai masuk laci shift; non-tunai tidak
   const [del, setDel] = useState(null); // catatan hutang yang akan dihapus (manajer)
 
   const counts = {
@@ -2746,7 +3004,7 @@ function Debts({ debts, onSettle, onPrint, onDelete }) {
                 )}
                 <button className="btn ghost sm" onClick={() => onPrint(d)}><Printer size={14} /> Cetak</button>
                 {d.status === "belum"
-                  ? <button className="btn sm" onClick={() => setConfirm(d)}><CheckCircle2 size={15} /> Lunas</button>
+                  ? <button className="btn sm" onClick={() => { setPayMode("cash"); setConfirm(d); }}><CheckCircle2 size={15} /> Lunas</button>
                   : <span className="done-tag"><Check size={14} /> {d.paidAt}</span>}
               </div>
             </div>
@@ -2761,15 +3019,23 @@ function Debts({ debts, onSettle, onPrint, onDelete }) {
         footer={
           <>
             <button className="btn ghost" onClick={() => setConfirm(null)}>Batal</button>
-            <button className="btn" onClick={() => { onSettle(confirm.id); setConfirm(null); }}><CheckCircle2 size={15} /> Ya, sudah lunas</button>
+            <button className="btn" onClick={() => { onSettle(confirm.id, payMode); setConfirm(null); }}><CheckCircle2 size={15} /> Ya, sudah lunas</button>
           </>
         }
       >
         {confirm && (
-          <p className="confirm-text">
-            Tandai hutang <b>{confirm.id}</b> dari <b>{confirm.debtor}{confirm.business ? ` (${confirm.business})` : ""}</b>
-            {" "}sebesar <b>{rp(confirm.total)}</b> sebagai sudah dibayar?
-          </p>
+          <>
+            <p className="confirm-text">
+              Tandai hutang <b>{confirm.id}</b> dari <b>{confirm.debtor}{confirm.business ? ` (${confirm.business})` : ""}</b>
+              {" "}sebesar <b>{rp(confirm.total)}</b> sebagai sudah dibayar?
+            </p>
+            <div className="muted xs" style={{ marginBottom: 6 }}>Dibayar via:</div>
+            <div className="pm-toggle">
+              <button type="button" className={payMode === "cash" ? "btn sm" : "btn ghost sm"} onClick={() => setPayMode("cash")}><Banknote size={14} /> Tunai</button>
+              <button type="button" className={payMode === "noncash" ? "btn sm" : "btn ghost sm"} onClick={() => setPayMode("noncash")}><QrCode size={14} /> Transfer / QRIS</button>
+            </div>
+            {payMode === "cash" && <div className="muted xs" style={{ marginTop: 8 }}>Uang tunai pelunasan otomatis dihitung sebagai kas masuk laci pada shift yang sedang berjalan.</div>}
+          </>
         )}
       </Modal>
 
@@ -4417,6 +4683,20 @@ function Style() {
       .shift-diff.ok{color:var(--ok);background:var(--ok-bg)}
       .shift-diff.over{color:var(--gold);background:var(--warn-bg)}
       .shift-diff.short{color:var(--crit);background:var(--crit-bg)}
+      .pm-toggle{display:flex;gap:8px}
+      .slog-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+      .slog-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+      .slog-card{border:1px solid var(--line);border-radius:var(--r);padding:14px;background:var(--panel);display:flex;flex-direction:column;gap:10px}
+      .slog-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+      .slog-who{display:flex;align-items:center;gap:10px}
+      .slog-name{font-weight:700}
+      .slog-badge{font-size:12px;font-weight:700;padding:4px 9px;border-radius:999px;white-space:nowrap}
+      .slog-badge.open{color:var(--gold);background:var(--warn-bg)}
+      .slog-badge.ok{color:var(--ok);background:var(--ok-bg)}
+      .slog-badge.over{color:var(--gold);background:var(--warn-bg)}
+      .slog-badge.short{color:var(--crit);background:var(--crit-bg)}
+      .slog-rows{display:flex;flex-direction:column;gap:5px}
+      .slog-actions{display:flex;justify-content:flex-end}
 
       .auto-tag{font-size:9.5px;font-weight:700;letter-spacing:.04em;color:var(--teal);background:var(--teal-soft);
         padding:1px 6px;border-radius:5px;margin-left:5px;vertical-align:middle}

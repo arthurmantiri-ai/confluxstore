@@ -164,6 +164,7 @@ export const Debts = {
     return data.map((r) => ({
       id: r.id, debtor: r.debtor, business: r.business, phone: r.phone,
       items: r.items || [], total: Number(r.total), status: r.status, date: r.date, paidAt: r.paid_at,
+      paidMethod: r.paid_method || null,
     }));
   },
   async create(d) {
@@ -174,13 +175,58 @@ export const Debts = {
     const { error } = await supabase.from("debts").insert(row);
     if (error) throw error;
   },
-  async settle(id, paidAt) {
-    const { error } = await supabase.from("debts").update({ status: "lunas", paid_at: paidAt }).eq("id", id);
+  async settle(id, paidAt, method) {
+    const { error } = await supabase.from("debts").update({ status: "lunas", paid_at: paidAt, paid_method: method ?? null }).eq("id", id);
     if (error) throw error;
   },
   async remove(id) {
     const { error } = await supabase.from("debts").delete().eq("id", id);
     if (error) throw error;
+  },
+};
+
+/* ============================ SHIFTS (buka/tutup kasir) ============================ */
+// Semua penulisan lewat RPC security definer — klien tidak bisa mengubah baris shift
+// secara langsung (tanpa policy insert/update/delete). Angka "seharusnya di laci"
+// dihitung SERVER saat tutup, dan kasir baru melihatnya SETELAH hitungan fisik
+// dikunci (blind count) — inti pencegahan kecurangan kas.
+const rowToShift = (r) => ({
+  id: r.id, cashier: r.cashier, status: r.status,
+  openedAt: r.opened_at ? Date.parse(r.opened_at) : null,
+  closedAt: r.closed_at ? Date.parse(r.closed_at) : null,
+  openingCash: Number(r.opening_cash || 0),
+  cashSales: r.cash_sales == null ? null : Number(r.cash_sales),
+  cashMoves: r.cash_moves == null ? null : Number(r.cash_moves),
+  expectedCash: r.expected_cash == null ? null : Number(r.expected_cash),
+  closingCash: r.closing_cash == null ? null : Number(r.closing_cash),
+  variance: r.variance == null ? null : Number(r.variance),
+  note: r.note || null,
+});
+export const Shifts = {
+  async open(cashier, openingCash) {
+    const { data, error } = await supabase.rpc("open_shift", { p_cashier: cashier, p_opening: openingCash });
+    if (error) throw error;
+    return rowToShift(data);
+  },
+  async close(id, counted, note) {
+    const { data, error } = await supabase.rpc("close_shift", { p_shift_id: id, p_counted: counted, p_note: note ?? null });
+    if (error) throw error;
+    return rowToShift(data);
+  },
+  // Kas laci non-penjualan (mis. pelunasan bon tunai) agar cocokan kas tetap akurat
+  async cashMove(shiftId, type, amount, note) {
+    const { error } = await supabase.rpc("shift_cash_move", { p_shift_id: shiftId, p_type: type, p_amount: amount, p_note: note ?? null });
+    if (error) throw error;
+  },
+  async get(id) {
+    const { data, error } = await supabase.from("shifts").select("*").eq("id", id).maybeSingle();
+    if (error) throw error;
+    return data ? rowToShift(data) : null;
+  },
+  async list(limit = 90) {
+    const { data, error } = await supabase.from("shifts").select("*").order("opened_at", { ascending: false }).limit(limit);
+    if (error) throw error;
+    return (data || []).map(rowToShift);
   },
 };
 
@@ -212,6 +258,7 @@ export const Sales = {
       date: r.date, ts: r.created_at ? Date.parse(r.created_at) : null,
       txnId: r.txn_id || null, cashier: r.cashier || null, method: r.method || null,
       qtyLabel: r.qty_label || null, receiptNo: r.receipt_no || null,
+      shiftId: r.shift_id || null, // shift kasir tempat transaksi terjadi (audit + cocokan kas)
       payments: r.payments || null, // rincian bayar campur [{method, amount}] — null = metode tunggal
     }));
   },
@@ -220,6 +267,7 @@ export const Sales = {
       product_id: s.productId, qty: s.qty, revenue: s.revenue, cost: s.cost, date: s.date,
       txn_id: s.txnId || null, cashier: s.cashier || null, method: s.method || null,
       qty_label: s.qtyLabel || null, receipt_no: s.receiptNo || null,
+      shift_id: s.shiftId || null,
       payments: s.payments || null,
     });
     if (error) throw error;
