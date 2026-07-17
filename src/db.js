@@ -45,14 +45,15 @@ export const Products = {
     if (error) throw error;
     return rowToProduct(data);
   },
-  async setStock(id, stock) {
-    const { error } = await supabase.from("products").update({ stock }).eq("id", id);
+  // Penyesuaian stok ABSOLUT (stock opname): kirim TARGET hitungan fisik, server yang
+  // menghitung selisih terhadap stok database SAAT INI (bukan angka di layar yang bisa
+  // basi), lalu menambah/memotong batch FIFO + mencatat riwayat — dalam satu transaksi.
+  async setStockAbsolute(id, target, cost, note) {
+    const { data, error } = await supabase.rpc("set_stock_absolute", {
+      p_id: id, p_target: target, p_cost: cost ?? null, p_note: note ?? null,
+    });
     if (error) throw error;
-  },
-  // Ubah stok lewat fungsi server (aman: kasir tak perlu izin update produk penuh)
-  async adjustStock(id, delta) {
-    const { error } = await supabase.rpc("adjust_stock", { p_id: id, p_delta: delta });
-    if (error) throw error;
+    return data == null ? null : Number(data);
   },
   // ===== FIFO: setiap penambahan stok = batch dengan harga belinya sendiri =====
   async restockFifo(id, qty, cost, note) {

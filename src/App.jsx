@@ -820,6 +820,34 @@ export default function App() {
     loadAll();
   }, [session]);
 
+  // ===== Anti layar basi =====
+  // Setiap perangkat memuat data saat login saja, sehingga stok di layar kasir dan
+  // manajer bisa berbeda dari database sepanjang hari. Ini sumber utama keluhan
+  // "stok tidak sesuai": angka yang dilihat (dan dipakai dasar opname) sudah basi.
+  // Solusi: tarik ulang daftar produk saat tab kembali aktif, berkala tiap 2 menit,
+  // dan (dipanggil manual) setelah transaksi/pembatalan.
+  const lastProdRefreshRef = useRef(0);
+  const refreshProducts = async (force = false) => {
+    if (!hasSupabase || !session) return;
+    const now = Date.now();
+    if (!force && now - lastProdRefreshRef.current < 15000) return; // rem: maks 1x / 15 dtk
+    lastProdRefreshRef.current = now;
+    try { setProducts(await Products.list()); }
+    catch (e) { console.error("[refresh]", e); }
+  };
+  useEffect(() => {
+    if (!hasSupabase || !session) return;
+    const onWake = () => { if (document.visibilityState === "visible") refreshProducts(); };
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    const t = setInterval(onWake, 120000);
+    return () => {
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+      clearInterval(t);
+    };
+  }, [session]);
+
   const recordMovement = async (productId, type, qty, note, unitCost) => {
     qty = Number(qty) || 0;
     if (qty <= 0) { flash("Jumlah harus lebih dari 0"); return; }
@@ -861,6 +889,7 @@ export default function App() {
     });
     setProducts((ps) => ps.map((p) => (newStock[p.id] != null ? { ...p, stock: newStock[p.id] } : p)));
     setMovements((m) => [...items.map((it) => ({ id: uid(), productId: it.pid, type: "out", qty: it.qty, note, at: "Baru saja" })), ...m]);
+    const jobs = []; // simpanan ke server dikumpulkan agar kegagalan bisa dilaporkan tegas
     items.forEach((it) => {
       const p = products.find((x) => x.id === it.pid);
       const est = (p?.cost || 0) * it.qty; // perkiraan lokal; server menghitung HPP FIFO yang sebenarnya
@@ -880,7 +909,7 @@ export default function App() {
           txnId: ctx.txnId || null, qty: it.qty, amount: est, status: "belum", paidAt: null, ts: Date.now(),
         }, ...cs]);
       }
-      persist(async () => {
+      if (hasSupabase) jobs.push((async () => {
         // ATOMIK: riwayat "keluar" + potong batch FIFO + kolom stok dalam SATU transaksi.
         // Penjualan (sales_log) hanya dicatat bila stok benar-benar terpotong.
         const cost = await Products.stockOut(it.pid, it.qty, note); // HPP FIFO dari server
@@ -892,8 +921,21 @@ export default function App() {
           });
           setConsigns((cs) => [row, ...cs]);
         }
-      });
+      })());
     });
+    if (hasSupabase && jobs.length) {
+      // Dulu tiap item fire-and-forget dengan toast kecil yang mudah terlewat.
+      // Sekarang: tunggu semuanya, umumkan kegagalan dengan jelas, lalu tarik
+      // angka stok yang sesungguhnya dari database supaya layar = kenyataan.
+      Promise.allSettled(jobs).then((rs) => {
+        const failed = rs.filter((r) => r.status === "rejected");
+        if (failed.length) {
+          console.error("[sync]", failed.map((f) => f.reason));
+          flash(`PERHATIAN: ${failed.length} barang GAGAL tersimpan ke server — layar disegarkan dari database. Cek riwayat & ulangi bila perlu.`);
+        }
+        refreshProducts(true);
+      });
+    }
   };
 
   // ===== Hapus transaksi (mode manajer) =====
@@ -913,6 +955,7 @@ export default function App() {
       ...m,
     ]);
     setConsigns((cs) => cs.filter((c) => !(c.txnId === t.txnId && c.status === "belum")));
+    refreshProducts(true); // layar mengikuti hasil pengembalian stok di server
     flash("Transaksi dihapus — stok dikembalikan");
     return true;
   };
@@ -977,19 +1020,26 @@ export default function App() {
 
   const updateProduct = (id, data) => {
     const prev = products.find((p) => p.id === id);
-    // Catat penyesuaian ke log & sinkronkan ke batch FIFO jika jumlah stok berubah lewat edit
-    if (prev && data.stock !== prev.stock) {
-      const diff = data.stock - prev.stock;
+    const merged = { ...prev, ...data };
+    const target = Number(data.stock);
+    // ===== Penyesuaian stok = ABSOLUT, bukan selisih dari layar =====
+    // Dulu: selisih dihitung terhadap angka di layar perangkat ini (prev.stock) yang
+    // bisa basi berjam-jam (perangkat lain sudah jualan) → hasil akhir di database
+    // meleset persis sebesar penjualan yang tak terlihat. Ini biang keladi utama
+    // "sudah diinput tapi stok tetap tidak cocok".
+    // Sekarang: target hitungan fisik dikirim apa adanya; SERVER yang membandingkan
+    // dengan stok database saat itu juga (baris dikunci), lalu menambah/memotong
+    // batch FIFO + mencatat riwayat dalam SATU transaksi (RPC set_stock_absolute).
+    if (prev && Number.isFinite(target) && target !== prev.stock) {
       setMovements((m) => [
-        { id: uid(), productId: id, type: diff > 0 ? "in" : "out", qty: Math.abs(diff), note: "Penyesuaian (edit barang)", at: "Baru saja" },
+        { id: uid(), productId: id, type: target > prev.stock ? "in" : "out", qty: Math.abs(target - prev.stock), note: "Penyesuaian (edit barang)", at: "Baru saja" },
         ...m,
       ]);
-      // ATOMIK: riwayat + batch FIFO + kolom stok dalam SATU transaksi server
-      persist(() => (diff > 0
-        ? Products.stockIn(id, diff, Number(data.cost) || prev.cost || 0, "Penyesuaian (edit barang)")
-        : Products.stockOut(id, Math.abs(diff), "Penyesuaian (edit barang)")));
+      persist(async () => {
+        const st = await Products.setStockAbsolute(id, target, Number(data.cost) || prev.cost || null, "Penyesuaian (edit barang)");
+        if (st != null) setProducts((ps) => ps.map((p) => (p.id === id ? { ...p, stock: Number(st) } : p)));
+      });
     }
-    const merged = { ...prev, ...data };
     setProducts((ps) => ps.map((p) => (p.id === id ? merged : p)));
     // Kolom stok TIDAK ditulis langsung — sepenuhnya dikelola RPC FIFO di atas
     persist(() => Products.updateInfo(id, merged));
@@ -2221,8 +2271,13 @@ function Kasir({ products, onCheckout }) {
 
   const canPay = lines.length > 0 && (isSplit ? splitOk : (!isCash || change >= 0));
 
+  // Rem anti klik-ganda: keranjang baru kosong SETELAH re-render, jadi klik kedua
+  // yang sangat cepat masih lolos canPay dan bisa membuat transaksi kembar.
+  const payBusyRef = useRef(false);
   const checkout = () => {
-    if (!canPay) return;
+    if (!canPay || payBusyRef.current) return;
+    payBusyRef.current = true;
+    setTimeout(() => { payBusyRef.current = false; }, 800);
     // Rincian bayar campur: paidParts = yang diserahkan (gross, untuk nota);
     // payments = net per metode (jumlah persis = total, kembalian dipotong dari tunai) — untuk arsip & kas.
     let splitMeta = {};
@@ -2468,7 +2523,14 @@ function Orders({ orders, setOrders, pById, products, onAccept, onStatus, onCrea
     return `Halo ${o.customer || ""}, pesanan *${o.id}* Anda ${status}.\n\n${lines}\n\nTotal: ${rp(orderTotal(o))}\n\nTerima kasih sudah berbelanja di Conflux Coffee Club! ☕`;
   };
 
+  // Rem anti ketuk-ganda: "Terima order" memotong stok — dua ketukan cepat sebelum
+  // layar sempat berganti akan memotong stok dua kali. (Diagnostik 16 Jul: belum
+  // pernah terjadi; rem ini asuransi murah supaya tetap begitu.)
+  const busyRef = useRef(false);
   const advance = (o) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setTimeout(() => { busyRef.current = false; }, 800);
     const i = ORDER_FLOW.indexOf(o.status);
     const next = ORDER_FLOW[Math.min(i + 1, ORDER_FLOW.length - 1)];
     if (o.status === "baru") onAccept(o);
