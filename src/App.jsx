@@ -444,8 +444,8 @@ function Stat({ icon: Icon, label, value, sub, accent }) {
 function Modal({ open, onClose, title, children, footer, width = 460 }) {
   if (!open) return null;
   return (
-    <div className="modal-scrim" onClick={onClose}>
-      <div className="modal" style={{ maxWidth: width }} onClick={(e) => e.stopPropagation()}>
+    <div className="modal-scrim">{/* klik di luar tidak menutup modal — hanya tombol X */}
+      <div className="modal" style={{ maxWidth: width }}>
         <div className="modal-head">
           <h3>{title}</h3>
           <button className="icon-btn" onClick={onClose}><X size={18} /></button>
@@ -4163,6 +4163,8 @@ function Style() {
         --shadow-accent:0 6px 22px rgba(226,81,77,.28);
         --ease:cubic-bezier(.22,.61,.36,1);
       }
+      /* Kunci pull-to-refresh & overscroll browser (tarik ke bawah tidak me-refresh halaman) */
+      html,body{overscroll-behavior:none}
       input,select,textarea{color:var(--ink);background:transparent;font-family:inherit}
       input::placeholder{color:var(--ink-faint)}
       select option{background:#1B2521;color:#ECE7DA}
