@@ -866,14 +866,42 @@ export default function App() {
   // Solusi: tarik ulang daftar produk saat tab kembali aktif, berkala tiap 2 menit,
   // dan (dipanggil manual) setelah transaksi/pembatalan.
   const lastProdRefreshRef = useRef(0);
-  const pendingSyncRef = useRef(0); // jumlah batch penjualan yang masih dikirim ke server
+  const pendingSyncRef = useRef(0);     // jumlah PENULISAN stok ke server yang masih berjalan
+  const prodSeqRef = useRef(0);         // nomor urut respons; respons lama tak boleh menimpa yang baru
+  const wantRefreshRef = useRef(false); // ada refresh yang ditunda karena penulisan sedang berjalan
   const refreshProducts = async (force = false) => {
     if (!hasSupabase || !session) return;
+    // JANGAN menarik daftar produk SELAGI ada penulisan stok yang belum selesai.
+    // Skenario nyata di kasir Android: bayar → pindah ke aplikasi printer → kembali.
+    // Peristiwa "kembali" memicu refresh persis saat transaksi masih dikirim; hasil
+    // tarikan berisi stok PRA-transaksi dan menimpa layar dengan angka lama — inilah
+    // gejala "sudah diinput tapi stok tidak berubah". Solusi: tandai dulu, dan begitu
+    // penulisan selesai endSync() menjalankan refresh paksa.
+    if (pendingSyncRef.current > 0) { wantRefreshRef.current = true; return; }
     const now = Date.now();
     if (!force && now - lastProdRefreshRef.current < 15000) return; // rem: maks 1x / 15 dtk
     lastProdRefreshRef.current = now;
-    try { setProducts(await Products.list()); }
+    const seq = ++prodSeqRef.current;
+    try {
+      const fresh = await Products.list();
+      // Dua tarikan bisa tumpang-tindih (fokus tab + refresh pasca-transaksi) dan
+      // jaringan tidak menjamin urutan respons: respons LAMA yang tiba belakangan
+      // dulu bisa menimpa respons BARU. Token urut memastikan hanya tarikan
+      // terakhir yang boleh mengisi layar.
+      if (seq === prodSeqRef.current) setProducts(fresh);
+    }
     catch (e) { console.error("[refresh]", e); }
+  };
+  // Pagar untuk SEMUA penulisan stok ke server (jual, stok masuk/keluar, opname,
+  // pembatalan): selama berjalan, refresh apa pun ditunda; setelah selesai, refresh
+  // yang tertunda otomatis dijalankan supaya layar = database.
+  const beginSync = () => { pendingSyncRef.current += 1; };
+  const endSync = () => {
+    pendingSyncRef.current = Math.max(0, pendingSyncRef.current - 1);
+    if (pendingSyncRef.current === 0 && wantRefreshRef.current) {
+      wantRefreshRef.current = false;
+      refreshProducts(true);
+    }
   };
   useEffect(() => {
     if (!hasSupabase || !session) return;
@@ -900,6 +928,8 @@ export default function App() {
     setProducts((ps) => ps.map((p) => (p.id === productId ? { ...p, stock: newStock, ...(type === "in" ? { cost: costIn } : {}) } : p)));
     setMovements((m) => [{ id: mid, productId, type, qty, note, at: "Baru saja" }, ...m]);
     if (!hasSupabase) return;
+    beginSync(); // pagar: refresh berkala tidak boleh menyela penulisan ini
+    let ok = false;
     try {
       if (type === "in") {
         // ATOMIK di server: riwayat + batch FIFO + kolom stok diperbarui dalam SATU transaksi (RPC stock_in).
@@ -910,13 +940,18 @@ export default function App() {
         // ATOMIK di server: riwayat + potong batch FIFO + kolom stok dalam SATU transaksi (RPC stock_out)
         await Products.stockOut(productId, qty, note);
       }
+      ok = true;
     } catch (e) {
       console.error("[sync]", e);
       // Gagal simpan → batalkan perubahan lokal supaya angka di layar = angka di database
       setProducts((ps) => ps.map((p) => (p.id === productId ? { ...p, stock: prevStock, ...(type === "in" ? { cost: prev?.cost || 0 } : {}) } : p)));
       setMovements((m) => m.filter((x) => x.id !== mid));
       flash(`GAGAL disimpan — stok tidak berubah. ${e?.message || "Cek koneksi"}`);
-    }
+    } finally { endSync(); }
+    // Stok KELUAR: RPC mengembalikan HPP, bukan stok akhir, sehingga angka lokal
+    // dihitung dari layar yang bisa basi (perangkat lain mungkin baru saja jualan).
+    // Tarik angka pasti dari database supaya layar = kenyataan.
+    if (ok && type === "out") refreshProducts(true);
   };
 
   // Penjualan (kasir & order): potong stok FIFO + catat HPP sesuai batch yang benar-benar terpakai.
@@ -968,14 +1003,17 @@ export default function App() {
       // Dulu tiap item fire-and-forget dengan toast kecil yang mudah terlewat.
       // Sekarang: tunggu semuanya, umumkan kegagalan dengan jelas, lalu tarik
       // angka stok yang sesungguhnya dari database supaya layar = kenyataan.
-      pendingSyncRef.current += 1;
+      beginSync();
       Promise.allSettled(jobs).then((rs) => {
-        pendingSyncRef.current = Math.max(0, pendingSyncRef.current - 1);
         const failed = rs.filter((r) => r.status === "rejected");
         if (failed.length) {
           console.error("[sync]", failed.map((f) => f.reason));
           flash(`PERHATIAN: ${failed.length} barang GAGAL tersimpan ke server — layar disegarkan dari database. Cek riwayat & ulangi bila perlu.`);
         }
+        // Refresh paksa di bawah sudah mencakup tarikan yang sempat tertunda,
+        // jadi bendera dibersihkan dulu agar tidak ada tarikan ganda.
+        wantRefreshRef.current = false;
+        endSync();
         refreshProducts(true);
       });
     }
@@ -986,19 +1024,27 @@ export default function App() {
   // pergerakan tercatat, kewajiban titip jual yang belum disetor ikut terhapus.
   const voidTxn = async (t) => {
     if (hasSupabase) {
+      beginSync(); // pagar: refresh berkala tidak boleh menyela pembatalan
       try { await Sales.voidTxn(t.txnId); }
       catch (e) { console.error("[void]", e); flash("Gagal menghapus transaksi — cek koneksi"); return false; }
+      finally { endSync(); }
     }
     setSalesLog((sl) => sl.filter((s) => s.txnId !== t.txnId));
-    const back = {};
-    (t.items || []).forEach((it) => { if (it.pid) back[it.pid] = (back[it.pid] || 0) + it.qty; });
-    setProducts((ps) => ps.map((p) => (back[p.id] ? { ...p, stock: p.stock + back[p.id] } : p)));
     setMovements((m) => [
       ...(t.items || []).filter((it) => it.pid).map((it) => ({ id: uid(), productId: it.pid, type: "in", qty: it.qty, note: "Pembatalan transaksi", at: "Baru saja" })),
       ...m,
     ]);
     setConsigns((cs) => cs.filter((c) => !(c.txnId === t.txnId && c.status === "belum")));
-    refreshProducts(true); // layar mengikuti hasil pengembalian stok di server
+    if (hasSupabase) {
+      // Mode server: angka stok pasca-pembatalan diambil langsung dari database.
+      // Menambah manual dari layar (stok layar + qty) rawan salah bila layar basi —
+      // hasilnya angka "melompat" sesaat lalu berubah lagi.
+      await refreshProducts(true);
+    } else {
+      const back = {};
+      (t.items || []).forEach((it) => { if (it.pid) back[it.pid] = (back[it.pid] || 0) + it.qty; });
+      setProducts((ps) => ps.map((p) => (back[p.id] ? { ...p, stock: p.stock + back[p.id] } : p)));
+    }
     flash("Transaksi dihapus — stok dikembalikan");
     return true;
   };
@@ -1079,6 +1125,7 @@ export default function App() {
     const code = nextCode(products);
     const initialStock = Number(data.stock) || 0;
     if (hasSupabase) {
+      beginSync(); // pagar: tarikan daftar produk yang menyela bisa belum memuat barang baru
       try {
         // Buat produk tanpa stok, lalu stok awal dicatat sebagai batch FIFO pertama
         const row = await Products.create({ code, ...data, stock: 0 });
@@ -1090,6 +1137,7 @@ export default function App() {
         flash(`Barang ${code} ditambahkan`);
         return;
       } catch (e) { console.error("[sync]", e); flash("Gagal simpan ke server"); }
+      finally { endSync(); }
     }
     setProducts((ps) => [{ id: uid(), code, ...data }, ...ps]);
     flash(`Barang ${code} ditambahkan`);
@@ -1097,8 +1145,11 @@ export default function App() {
 
   const updateProduct = (id, data) => {
     const prev = products.find((p) => p.id === id);
-    const merged = { ...prev, ...data };
     const target = Number(data.stock);
+    const adjust = prev && Number.isFinite(target) && target !== prev.stock;
+    // Stok pada state lokal dijaga tetap NUMERIK: pakai target bila ada penyesuaian,
+    // selain itu pertahankan angka lama (nilai mentah form bisa berupa string).
+    const merged = { ...prev, ...data, stock: adjust ? target : (prev?.stock ?? 0) };
     // ===== Penyesuaian stok = ABSOLUT, bukan selisih dari layar =====
     // Dulu: selisih dihitung terhadap angka di layar perangkat ini (prev.stock) yang
     // bisa basi berjam-jam (perangkat lain sudah jualan) → hasil akhir di database
@@ -1107,14 +1158,17 @@ export default function App() {
     // Sekarang: target hitungan fisik dikirim apa adanya; SERVER yang membandingkan
     // dengan stok database saat itu juga (baris dikunci), lalu menambah/memotong
     // batch FIFO + mencatat riwayat dalam SATU transaksi (RPC set_stock_absolute).
-    if (prev && Number.isFinite(target) && target !== prev.stock) {
+    if (adjust) {
       setMovements((m) => [
         { id: uid(), productId: id, type: target > prev.stock ? "in" : "out", qty: Math.abs(target - prev.stock), note: "Penyesuaian (edit barang)", at: "Baru saja" },
         ...m,
       ]);
       persist(async () => {
-        const st = await Products.setStockAbsolute(id, target, Number(data.cost) || prev.cost || null, "Penyesuaian (edit barang)");
-        if (st != null) setProducts((ps) => ps.map((p) => (p.id === id ? { ...p, stock: Number(st) } : p)));
+        beginSync(); // pagar: refresh berkala tidak boleh menyela penulisan opname
+        try {
+          const st = await Products.setStockAbsolute(id, target, Number(data.cost) || prev.cost || null, "Penyesuaian (edit barang)");
+          if (st != null) setProducts((ps) => ps.map((p) => (p.id === id ? { ...p, stock: Number(st) } : p)));
+        } finally { endSync(); }
       });
     }
     setProducts((ps) => ps.map((p) => (p.id === id ? merged : p)));
@@ -2178,7 +2232,11 @@ function ProductForm({ product, products, categories, onClose, onSave }) {
       name: String(f.name).trim(),
       sku: String(f.sku || "").trim().toUpperCase() || genSku(cat, allProducts),
       category: cat, unit: String(f.unit || "pcs").trim(),
-      price: Number(f.price) || 0, cost: Number(f.cost) || 0, stock: Number(f.stock) || 0,
+      price: Number(f.price) || 0, cost: Number(f.cost) || 0,
+      // Mode edit: kolom stok yang DIKOSONGKAN berarti "tidak diubah" (bukan nol).
+      // Tanpa ini, mengedit harga sambil tak sengaja menghapus isi kolom stok akan
+      // memicu opname ke 0 di server — stok lenyap tanpa disadari.
+      stock: f.stock === "" && product ? (Number(product.stock) || 0) : (Number(f.stock) || 0),
       cartonSize: csize, priceCarton: csize > 0 ? Number(f.priceCarton) || 0 : 0,
       promo: { active: !!promo.active, type: promo.type || "percent", value: Number(promo.value) || 0 },
       dailyUsage: Number(f.dailyUsage) || 0, leadTime: Number(f.leadTime) || 0, safetyStock: Number(f.safetyStock) || 0,
