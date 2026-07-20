@@ -272,6 +272,34 @@ export const Sales = {
     });
     if (error) throw error;
   },
+  // ===== Sinkronisasi SATU transaksi penuh (online & offline) =====
+  // Satu panggilan = satu transaksi database di server: potong batch FIFO +
+  // kolom stok + riwayat + baris penjualan (+ hutang bila ada). Aman diulang:
+  // server memakai client_id sebagai kunci idempotensi (buku besar synced_txns),
+  // jadi kiriman ganda dijawab { status: "duplicate" } tanpa menulis apa pun.
+  // item = { clientId, note, soldAt(ISO), rows:[{snake_case, tanpa cost}], debt? }
+  async syncTxn(item) {
+    // Timeout sisi klien: jaringan "black-hole" (tersambung tapi paket hilang) tidak
+    // boleh menggantung flush selamanya. Batalkan setelah 20 dtk → dianggap transien
+    // → dicoba lagi pada pemicu berikutnya. Antrean tetap utuh.
+    const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
+    try {
+      let q = supabase.rpc("sync_sale_txn", {
+        p_client_id: item.clientId,
+        p_note: item.note ?? null,
+        p_sold_at: item.soldAt ?? null,
+        p_rows: item.rows,
+        p_debt: item.debt ?? null,
+      });
+      if (ctrl && q.abortSignal) q = q.abortSignal(ctrl.signal);
+      const { data, error } = await q;
+      if (error) throw error;
+      return data || {}; // { status:"ok"|"duplicate", items, revenue, at, debt_id }
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  },
   // Hapus satu transaksi utuh (semua baris txn_id yang sama) di server.
   // Stok dikembalikan sebagai batch FIFO & pergerakan tercatat — lihat void_txn di SQL.
   async voidTxn(txnId) {

@@ -68,6 +68,65 @@ const loadCashierSession = (uid) => {
 };
 const clearCashierSession = () => { try { localStorage.removeItem(CASHIER_KEY); } catch (e) {} };
 
+// ===== ANTREAN OFFLINE (OUTBOX) =====
+// Saat internet putus di tengah jam sibuk, transaksi kasir TIDAK boleh hilang.
+// Setiap checkout disimpan permanen di perangkat (localStorage) sebagai satu
+// paket "menunggu kirim". Paket dikirim ke server lewat SATU RPC atomik yang
+// idempoten; begitu server menjawab berhasil ATAU "sudah pernah" (duplicate),
+// paket dihapus dari antrean. Karena antrean ada di localStorage, ia SELAMAT
+// dari reload maupun aplikasi tertutup, lalu terkirim otomatis begitu online.
+const OUTBOX_KEY = "conflux.outbox.v1";
+const loadOutbox = () => {
+  try {
+    const raw = localStorage.getItem(OUTBOX_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    // Buang isi yang rusak; hanya paket dengan clientId + minimal 1 baris yang sah.
+    return Array.isArray(arr)
+      ? arr.filter((x) => x && typeof x.clientId === "string" && Array.isArray(x.rows) && x.rows.length)
+      : [];
+  } catch (e) { return []; }
+};
+const saveOutbox = (list) => {
+  try { localStorage.setItem(OUTBOX_KEY, JSON.stringify(list || [])); } catch (e) {}
+};
+// ID unik SEUMUR HIDUP per checkout — kunci anti-dobel di sisi server.
+const clientTxnId = () => {
+  try { if (crypto?.randomUUID) return crypto.randomUUID(); } catch (e) {}
+  return "ct-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+};
+
+// ===== DEAD-LETTER =====
+// Paket yang DITOLAK PERMANEN server (mis. produk sudah dihapus perangkat lain
+// selagi perangkat ini offline) dipindah ke sini. Tujuannya: satu paket bermasalah
+// TIDAK memblokir seluruh antrean, tetapi juga TIDAK hilang diam-diam — datanya
+// tersimpan permanen dan ditampilkan agar admin bisa memulihkan transaksinya.
+const DEAD_KEY = "conflux.outbox.dead.v1";
+const loadDead = () => {
+  try { const a = JSON.parse(localStorage.getItem(DEAD_KEY) || "[]"); return Array.isArray(a) ? a : []; }
+  catch (e) { return []; }
+};
+const saveDead = (list) => { try { localStorage.setItem(DEAD_KEY, JSON.stringify(list || [])); } catch (e) {} };
+// Error dari SERVER yang PERMANEN (retry tidak akan menolong): raise eksplisit dari
+// fungsi kita, atau data yang tidak valid (uuid rusak, pelanggaran integritas).
+// SENGAJA konservatif: error yang bisa pulih (deadlock 40P01, serialisasi 40001,
+// gangguan koneksi 08xxx, dsb.) TIDAK dianggap permanen — biar dicoba lagi, bukan
+// dikarantina. Gagal jaringan murni juga transien (tak punya kode SQLSTATE).
+const PERMANENT_SQLSTATES = new Set([
+  "22P02", // invalid_text_representation (mis. uuid produk rusak)
+  "22003", // numeric_value_out_of_range
+  "23502", // not_null_violation
+  "23503", // foreign_key_violation
+  "23514", // check_violation
+]);
+const isPermanentSyncError = (e) => {
+  const msg = String(e?.message || "").toLowerCase();
+  // Raise eksplisit dari sync_sale_txn (produk hilang / input tak valid).
+  if (msg.includes("produk tidak ditemukan") || msg.includes("p_rows") || msg.includes("qty tidak valid")) return true;
+  const code = e?.code;
+  return typeof code === "string" && PERMANENT_SQLSTATES.has(code);
+};
+
 // Siklus order / periode review (hari) — dipakai untuk saran jumlah re-stok
 const REVIEW_DAYS = 7;
 
@@ -485,6 +544,53 @@ function Toast({ msg }) {
   return <div className="toast"><Check size={15} /> {msg}</div>;
 }
 
+// Banner status koneksi & antrean offline. Diam saat semuanya beres (online, tidak
+// ada antrean). Muncul saat: offline, sedang menyinkron, atau ada transaksi
+// menunggu (dengan tombol coba-lagi). Tujuannya kasir selalu tahu apakah data
+// sudah aman di server atau masih menunggu — tanpa perlu paham teknisnya.
+function SyncBanner({ online, syncing, pending, dead, onRetry, onCopyDead }) {
+  const deadBar = dead > 0 ? (
+    <div className="sync-banner dead">
+      <AlertTriangle size={16} />
+      <span><b>{dead} transaksi gagal disinkronkan</b> (mis. barang telah dihapus). Data tersimpan aman — salin untuk dipulihkan admin.</span>
+      <button className="sync-retry" onClick={onCopyDead}>Salin data</button>
+    </div>
+  ) : null;
+
+  let statusBar = null;
+  if (!online) {
+    statusBar = (
+      <div className="sync-banner offline">
+        <AlertTriangle size={16} />
+        <span>
+          <b>Mode offline.</b>{" "}
+          {pending > 0
+            ? `${pending} transaksi tersimpan aman di perangkat & akan otomatis terkirim saat internet kembali.`
+            : "Transaksi tetap bisa dijalankan; perubahan akan tersinkron saat internet kembali."}
+        </span>
+      </div>
+    );
+  } else if (syncing) {
+    statusBar = (
+      <div className="sync-banner syncing">
+        <RefreshCcw size={16} className="spin" />
+        <span>Menyinkronkan{pending > 0 ? ` ${pending} transaksi` : ""}…</span>
+      </div>
+    );
+  } else if (pending > 0) {
+    statusBar = (
+      <div className="sync-banner pending">
+        <Clock size={16} />
+        <span>{pending} transaksi menunggu tersinkron.</span>
+        <button className="sync-retry" onClick={onRetry}>Coba lagi</button>
+      </div>
+    );
+  }
+
+  if (!statusBar && !deadBar) return null;
+  return <>{statusBar}{deadBar}</>;
+}
+
 function Receipt({ store, data }) {
   if (!data) return null;
   const d = data;
@@ -790,6 +896,11 @@ export default function App() {
   const [profileRole, setProfileRole] = useState(null);
   const loadedRef = useRef(false);
   const authUidRef = useRef(null);
+  // Benar HANYA setelah daftar produk sungguhan berhasil ditarik dari server.
+  // Selagi false (mis. sesi login pulih dari cache tapi katalog gagal dimuat),
+  // penjualan DILARANG agar tidak menembak ID produk contoh (seed) yang tak ada
+  // di database — yang akan membuat paket antrean gagal sinkron selamanya.
+  const dataReadyRef = useRef(false);
 
   const loadAll = async () => {
     const res = await Promise.allSettled([
@@ -798,7 +909,7 @@ export default function App() {
       Consign.list(),
     ]);
     const [p, mv, od, dz, cap, exp, sl, st, cg] = res;
-    if (p.status === "fulfilled") setProducts(p.value);
+    if (p.status === "fulfilled") { setProducts(p.value); dataReadyRef.current = true; }
     if (mv.status === "fulfilled") setMovements(mv.value);
     if (od.status === "fulfilled") setOrders(od.value);
     if (dz.status === "fulfilled") setDebts(dz.value);
@@ -884,6 +995,7 @@ export default function App() {
     const seq = ++prodSeqRef.current;
     try {
       const fresh = await Products.list();
+      dataReadyRef.current = true; // katalog sungguhan sudah pernah termuat
       // Dua tarikan bisa tumpang-tindih (fokus tab + refresh pasca-transaksi) dan
       // jaringan tidak menjamin urutan respons: respons LAMA yang tiba belakangan
       // dulu bisa menimpa respons BARU. Token urut memastikan hanya tarikan
@@ -905,13 +1017,120 @@ export default function App() {
   };
   useEffect(() => {
     if (!hasSupabase || !session) return;
-    const onWake = () => { if (document.visibilityState === "visible") refreshProducts(); };
+    const onWake = () => { if (document.visibilityState === "visible") { refreshProducts(); flushOutbox(); } };
     document.addEventListener("visibilitychange", onWake);
     window.addEventListener("focus", onWake);
     const t = setInterval(onWake, 120000);
     return () => {
       document.removeEventListener("visibilitychange", onWake);
       window.removeEventListener("focus", onWake);
+      clearInterval(t);
+    };
+  }, [session]);
+
+  // ===== ANTREAN OFFLINE (OUTBOX) — sumber kebenaran di ref, cermin di localStorage =====
+  // Ref dipakai sebagai sumber kebenaran (bukan state) supaya checkout beruntun yang
+  // sangat cepat tidak saling menimpa akibat penjadwalan render React. Panjang antrean
+  // dicerminkan ke state hanya untuk tampilan banner.
+  const outboxRef = useRef(loadOutbox());
+  const [pendingCount, setPendingCount] = useState(outboxRef.current.length);
+  const [syncing, setSyncing] = useState(false);
+  const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine !== false);
+  const deadRef = useRef(loadDead());
+  const [deadCount, setDeadCount] = useState(deadRef.current.length);
+  const flushingRef = useRef(false);
+  const flushPromiseRef = useRef(null); // promise flush yang sedang berjalan (agar bisa di-await)
+  const persistOutbox = () => { saveOutbox(outboxRef.current); setPendingCount(outboxRef.current.length); };
+  const enqueueTxn = (payload) => { outboxRef.current = [...outboxRef.current, payload]; persistOutbox(); flushOutbox(); };
+
+  // Kirim antrean ke server, PALING LAMA dulu, SATU per satu. Paket hanya dihapus
+  // dari antrean SETELAH server memastikan tersimpan (ok) atau menyatakan sudah
+  // pernah tersimpan (duplicate). Gagal jaringan → berhenti, antrean tetap utuh,
+  // dicoba lagi nanti — jadi transaksi tidak mungkin hilang maupun tercatat dobel.
+  // Selalu MENGEMBALIKAN promise: pemanggil (mis. tutup shift) bisa menunggu sampai
+  // antrean benar-benar terkuras. Jika flush lain sedang jalan, promise itu yang
+  // dikembalikan (tidak pernah menjalankan dua flush sekaligus).
+  const flushOutbox = () => {
+    if (!hasSupabase || !session) return Promise.resolve();
+    if (flushingRef.current) return flushPromiseRef.current || Promise.resolve();
+    if (!outboxRef.current.length) return Promise.resolve();
+    // Catatan: sengaja TIDAK memakai navigator.onLine sebagai gerbang. Bila benar
+    // offline, permintaan gagal cepat lalu dicoba lagi; sebaliknya kalau onLine
+    // "macet-false" (bug perangkat), antrean tetap terkuras — bukan diam selamanya.
+    flushingRef.current = true;
+    setSyncing(true);
+    const run = (async () => {
+      let drained = 0;
+      try {
+        while (outboxRef.current.length) {
+          const item = outboxRef.current[0];
+          let res;
+          try {
+            res = await Sales.syncTxn(item);
+          } catch (e) {
+            if (isPermanentSyncError(e)) {
+              // DITOLAK PERMANEN server (mis. produk telah dihapus). Retry percuma dan
+              // hanya memblokir paket lain di belakangnya. Pindah ke dead-letter
+              // (tersimpan permanen + ditampilkan agar admin bisa memulihkan), lalu
+              // LANJUT ke paket berikutnya — antrean tidak macet.
+              console.error("[outbox:permanen]", e, item);
+              item.deadReason = e?.message || "ditolak server";
+              item.deadAt = Date.now();
+              deadRef.current = [...deadRef.current, item];
+              saveDead(deadRef.current); setDeadCount(deadRef.current.length);
+              outboxRef.current = outboxRef.current.slice(1);
+              persistOutbox();
+              flash("1 transaksi tidak dapat disinkronkan (mungkin barang telah dihapus) — tersimpan untuk ditinjau admin.");
+              continue;
+            }
+            // Transien (koneksi putus/timeout): simpan jejak error, hentikan loop,
+            // pertahankan SELURUH antrean apa adanya untuk percobaan berikutnya.
+            console.error("[outbox]", e);
+            item.attempts = (item.attempts || 0) + 1;
+            item.lastError = e?.message || "gagal";
+            persistOutbox();
+            break;
+          }
+          // Berhasil / duplikat → paket ini selesai, keluarkan dari kepala antrean.
+          // (Append checkout baru selagi menunggu tetap aman: ia di ekor referensi
+          //  array terbaru; slice(1) hanya membuang kepala yang barusan diproses.)
+          outboxRef.current = outboxRef.current.slice(1);
+          persistOutbox();
+          drained++;
+          // Selaraskan nomor bon lokal bila server terpaksa memberi nomor lain
+          // (dua perangkat offline sempat memilih nomor HTG yang sama).
+          if (res?.debt_id && item.localDebtId && res.debt_id !== item.localDebtId) {
+            setDebts((ds) => ds.map((d) => (d.id === item.localDebtId ? { ...d, id: res.debt_id } : d)));
+          }
+        }
+      } finally {
+        flushingRef.current = false;
+        setSyncing(false);
+        flushPromiseRef.current = null;
+        if (drained > 0) {
+          refreshProducts(true); // ada yang terkirim → tarik stok terbaru
+          // Titipan yang laku saat offline baru dibuat server ketika sinkron; tarik
+          // ulang agar kewajiban setor ke distributor langsung tampak.
+          Consign.list().then((cg) => setConsigns(cg)).catch(() => {});
+        }
+      }
+    })();
+    flushPromiseRef.current = run;
+    return run;
+  };
+
+  // Pemicu sinkronisasi: koneksi kembali, tab aktif kembali, berkala, dan saat login.
+  useEffect(() => {
+    if (!hasSupabase || !session) return;
+    const goOnline = () => { setOnline(true); flushOutbox(); };
+    const goOffline = () => setOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    flushOutbox(); // ada sisa dari sesi sebelumnya? kirim sekarang.
+    const t = setInterval(flushOutbox, 20000); // dorong tiap 20 dtk selama masih ada antrean
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
       clearInterval(t);
     };
   }, [session]);
@@ -956,7 +1175,25 @@ export default function App() {
 
   // Penjualan (kasir & order): potong stok FIFO + catat HPP sesuai batch yang benar-benar terpakai.
   // Aman jika produk yang sama muncul lebih dari satu baris.
+  //
+  // ===== TAHAN INTERNET PUTUS =====
+  // Layar diperbarui seketika (optimistik). Untuk mode server, SATU paket transaksi
+  // dimasukkan ke ANTREAN OFFLINE (localStorage) lalu dikirim lewat RPC atomik yang
+  // idempoten. Jika koneksi putus, paket menunggu di antrean dan terkirim otomatis
+  // saat online — TANPA risiko hilang (antrean permanen di perangkat) maupun dobel
+  // (server menolak client_id yang sama). ctx.debt (bila bayar = hutang) ikut dalam
+  // paket yang sama sehingga bon & penjualan tersimpan bersama atau batal bersama.
   const sellItems = (items, note, ctx = {}) => {
+    // Penjaga: mode server tapi katalog sungguhan belum termuat → jangan proses.
+    // Mencegah paket antrean berisi ID produk contoh yang tak ada di database.
+    if (hasSupabase && !dataReadyRef.current) {
+      flash("Data toko belum termuat dari server. Sambungkan internet lalu buka ulang aplikasi sebelum berjualan.");
+      return;
+    }
+    const saleDate = new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
+    const soldAt = new Date().toISOString();
+
+    // 1) Perbarui layar seketika (stok, riwayat, log penjualan) — pengalaman kasir mulus.
     const newStock = {};
     items.forEach((it) => {
       const base = newStock[it.pid] != null ? newStock[it.pid] : (products.find((p) => p.id === it.pid)?.stock ?? 0);
@@ -964,57 +1201,46 @@ export default function App() {
     });
     setProducts((ps) => ps.map((p) => (newStock[p.id] != null ? { ...p, stock: newStock[p.id] } : p)));
     setMovements((m) => [...items.map((it) => ({ id: uid(), productId: it.pid, type: "out", qty: it.qty, note, at: "Baru saja" })), ...m]);
-    const jobs = []; // simpanan ke server dikumpulkan agar kegagalan bisa dilaporkan tegas
+
+    const rows = [];
     items.forEach((it) => {
       const p = products.find((x) => x.id === it.pid);
-      const est = (p?.cost || 0) * it.qty; // perkiraan lokal; server menghitung HPP FIFO yang sebenarnya
-      const rec = {
-        productId: it.pid, qty: it.qty, revenue: it.revenue, date: "Hari ini",
+      const est = (p?.cost || 0) * it.qty; // HPP perkiraan lokal; server menghitung FIFO sebenarnya
+      const qtyLabel = it.qtyLabel || `${num(it.qty)} ${p?.unit || ""}`.trim();
+      // Catatan penjualan untuk tampilan lokal (ts asli agar grafik & laporan benar
+      // walau baru tersinkron nanti).
+      setSalesLog((sl) => [{
+        id: uid(), productId: it.pid, qty: it.qty, revenue: it.revenue, cost: est, date: saleDate,
         ts: Date.now(), txnId: ctx.txnId || null, cashier: ctx.cashier || null, method: ctx.method || null,
-        shiftId: ctx.shiftId || null, // audit: transaksi menempel ke shift kasir yang sedang buka
-        qtyLabel: it.qtyLabel || `${num(it.qty)} ${p?.unit || ""}`.trim(),
-        receiptNo: ctx.receiptNo || null,
-        payments: ctx.payments || null, // rincian bayar campur (net, jumlah = total txn); null = metode tunggal
-      };
-      setSalesLog((sl) => [{ id: uid(), ...rec, cost: est }, ...sl]);
-      // Titip jual: barang laku = muncul kewajiban setor ke distributor sebesar HPP-nya
-      const isConsign = !!p?.isConsign;
-      if (isConsign && !hasSupabase) {
+        shiftId: ctx.shiftId || null, qtyLabel, receiptNo: ctx.receiptNo || null, payments: ctx.payments || null,
+      }, ...sl]);
+      // Titip jual di mode lokal (tanpa server) dicatat langsung; di mode server,
+      // kewajiban setor dibuat oleh RPC saat paket tersinkron.
+      if (!hasSupabase && p?.isConsign) {
         setConsigns((cs) => [{
           id: uid(), productId: it.pid, productName: p?.name || "—", supplier: p?.supplier || "",
           txnId: ctx.txnId || null, qty: it.qty, amount: est, status: "belum", paidAt: null, ts: Date.now(),
         }, ...cs]);
       }
-      if (hasSupabase) jobs.push((async () => {
-        // ATOMIK: riwayat "keluar" + potong batch FIFO + kolom stok dalam SATU transaksi.
-        // Penjualan (sales_log) hanya dicatat bila stok benar-benar terpotong.
-        const cost = await Products.stockOut(it.pid, it.qty, note); // HPP FIFO dari server
-        await Sales.create({ ...rec, cost });
-        if (isConsign) {
-          const row = await Consign.create({
-            productId: it.pid, productName: p?.name || "—", supplier: p?.supplier || "",
-            txnId: ctx.txnId || null, qty: it.qty, amount: cost,
-          });
-          setConsigns((cs) => [row, ...cs]);
-        }
-      })());
+      // Baris untuk server (snake_case, TANPA cost — server yang mengisi HPP FIFO).
+      rows.push({
+        product_id: it.pid, qty: it.qty, revenue: it.revenue, date: saleDate,
+        txn_id: ctx.txnId || null, cashier: ctx.cashier || null, method: ctx.method || null,
+        qty_label: qtyLabel, receipt_no: ctx.receiptNo || null,
+        shift_id: ctx.shiftId || null, payments: ctx.payments || null,
+      });
     });
-    if (hasSupabase && jobs.length) {
-      // Dulu tiap item fire-and-forget dengan toast kecil yang mudah terlewat.
-      // Sekarang: tunggu semuanya, umumkan kegagalan dengan jelas, lalu tarik
-      // angka stok yang sesungguhnya dari database supaya layar = kenyataan.
-      beginSync();
-      Promise.allSettled(jobs).then((rs) => {
-        const failed = rs.filter((r) => r.status === "rejected");
-        if (failed.length) {
-          console.error("[sync]", failed.map((f) => f.reason));
-          flash(`PERHATIAN: ${failed.length} barang GAGAL tersimpan ke server — layar disegarkan dari database. Cek riwayat & ulangi bila perlu.`);
-        }
-        // Refresh paksa di bawah sudah mencakup tarikan yang sempat tertunda,
-        // jadi bendera dibersihkan dulu agar tidak ada tarikan ganda.
-        wantRefreshRef.current = false;
-        endSync();
-        refreshProducts(true);
+
+    // 2) Mode server → titip ke antrean (idempoten + atomik). Mode lokal → cukup di memori.
+    if (hasSupabase) {
+      enqueueTxn({
+        clientId: clientTxnId(),
+        note,
+        soldAt,
+        rows,
+        debt: ctx.debt || null,           // bon (bila metode = hutang) — atomik bersama penjualan
+        localDebtId: ctx.debt?.id || null, // untuk menyelaraskan nomor bon bila server memberi nomor lain
+        attempts: 0,
       });
     }
   };
@@ -1101,7 +1327,19 @@ export default function App() {
     const counted = Number(String(shiftCash).replace(/\D/g, "")) || 0;
     setClosingBusy(true);
     try {
-      // beri kesempatan transaksi terakhir selesai tersimpan (maks ~4 detik)
+      // WAJIB sinkron dulu: "seharusnya di laci" dihitung SERVER. Bila masih ada
+      // transaksi offline yang belum terkirim, angka itu akan KURANG dari kenyataan
+      // dan cocokan kas jadi salah. Coba kuras antrean; bila belum bisa (masih
+      // offline), tolak menutup shift dan minta sambungkan internet dulu.
+      if (hasSupabase && outboxRef.current.length) {
+        await flushOutbox();
+        if (outboxRef.current.length) {
+          setClosingBusy(false);
+          flash(`Belum bisa tutup shift: ${outboxRef.current.length} transaksi belum tersinkron. Sambungkan internet dulu agar cocokan kas akurat.`);
+          return;
+        }
+      }
+      // beri kesempatan penulisan stok terakhir selesai tersimpan (maks ~4 detik)
       for (let i = 0; i < 20 && pendingSyncRef.current > 0; i++) await new Promise((r) => setTimeout(r, 200));
       let closed = null;
       if (hasSupabase && shift?.id) {
@@ -1208,16 +1446,23 @@ export default function App() {
   const deleteExpense = (id) => { setExpenses((x) => x.filter((y) => y.id !== id)); persist(() => Expenses.remove(id)); };
 
   const today = new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
+  // Bangun objek bon + tampilkan seketika di daftar hutang, lalu KEMBALIKAN objeknya.
+  // Penulisan ke server TIDAK dilakukan di sini: bon dititipkan ke paket penjualan
+  // (antrean offline) agar tersimpan ATOMIK bersama transaksi & tahan internet putus.
+  const buildDebt = (meta, total) => {
+    const debt = {
+      id: nextDebtId(debts),
+      debtor: meta.debtor || "Pelanggan", business: meta.business || "", phone: meta.phone || "",
+      items: meta.items || [], total, date: today, status: "belum", paidAt: null,
+    };
+    setDebts((ds) => [debt, ...ds]);
+    return debt;
+  };
+  // Bon di luar alur kasir (mode lokal tanpa server): tulis langsung seperti biasa.
   const addDebt = (meta, total) => {
-    setDebts((ds) => {
-      const debt = {
-        id: nextDebtId(ds),
-        debtor: meta.debtor || "Pelanggan", business: meta.business || "", phone: meta.phone || "",
-        items: meta.items || [], total, date: today, status: "belum", paidAt: null,
-      };
-      persist(() => DebtsApi.create(debt));
-      return [debt, ...ds];
-    });
+    const debt = buildDebt(meta, total);
+    if (hasSupabase) persist(() => DebtsApi.create(debt));
+    return debt;
   };
   const settleDebt = (id, method = "cash") => {
     const d = debts.find((x) => x.id === id);
@@ -1452,6 +1697,18 @@ export default function App() {
         </header>
 
         <div className="content">
+          <SyncBanner
+            online={online} syncing={syncing} pending={pendingCount} dead={deadCount}
+            onRetry={flushOutbox}
+            onCopyDead={() => {
+              const txt = JSON.stringify(deadRef.current, null, 2);
+              const done = () => flash("Data transaksi gagal disalin ke clipboard — tempel & kirim ke admin.");
+              try {
+                if (navigator?.clipboard?.writeText) navigator.clipboard.writeText(txt).then(done).catch(() => { console.log(txt); flash("Tidak bisa menyalin otomatis — data dicetak di console (F12)."); });
+                else { console.log(txt); flash("Data dicetak di console (F12) — salin dari sana."); }
+              } catch (e) { console.log(txt); flash("Data dicetak di console (F12) — salin dari sana."); }
+            }}
+          />
           {view === "dashboard" && (
             <Dashboard
               products={products} chart={salesChart} todayRev={todayRev} deltaPct={deltaPct} lowStock={lowStock}
@@ -1476,14 +1733,27 @@ export default function App() {
           {view === "kasir" && (
             <Kasir products={products}
               onCheckout={(lines, total, method, meta) => {
+                // Penjaga awal: bila katalog belum termuat (mode server), hentikan sebelum
+                // membuat bon lokal maupun memproses apa pun — cegah bon yatim.
+                if (hasSupabase && !dataReadyRef.current) {
+                  flash("Data toko belum termuat dari server. Sambungkan internet lalu buka ulang aplikasi sebelum berjualan.");
+                  return;
+                }
                 const txnId = uid();
                 const no = invoiceNo(); // nomor nota disimpan ke log agar bisa dicetak ulang
+                // Bayar dengan hutang: bangun bon lokal DULU, lalu titipkan ke paket
+                // penjualan agar bon & transaksi tersimpan atomik (satu RPC) dan sama-sama
+                // tahan internet putus. Mode lokal (tanpa server) tetap seperti biasa.
+                let debt = null;
+                if (method === "hutang") {
+                  debt = hasSupabase ? buildDebt(meta, total) : addDebt(meta, total);
+                }
                 sellItems(
                   (meta.items || []).map((it) => ({ pid: it.pid, qty: it.qty, revenue: it.lineTotal, qtyLabel: it.qtyLabel })),
                   `Penjualan kasir (${PAY_LABEL[method]})`,
-                  { txnId, cashier: cashierName || "Kasir", method, receiptNo: no, payments: meta.payments || null, shiftId: shift?.id || null }
+                  { txnId, cashier: cashierName || "Kasir", method, receiptNo: no, payments: meta.payments || null, shiftId: shift?.id || null, debt }
                 );
-                if (method === "hutang") { addDebt(meta, total); flash(`Hutang ${rp(total)} dicatat — ${meta?.debtor || "Pelanggan"}`); }
+                if (method === "hutang") flash(`Hutang ${rp(total)} dicatat — ${meta?.debtor || "Pelanggan"}`);
                 else if (method === "split") flash(`Pembayaran ${rp(total)} campur (${payListLabel(meta.payments)}) berhasil`);
                 else flash(`Pembayaran ${rp(total)} via ${PAY_LABEL[method]} berhasil`);
                 setPrintReceipt(buildSaleReceipt(total, method, meta, no));
@@ -4794,6 +5064,25 @@ function Style() {
       .calc hr{border:none;border-top:1px solid var(--line);margin:2px 0}
       .calc-final{font-weight:700} .calc-final b{color:var(--accent)}
       .restock-action{display:flex;flex-direction:column;gap:8px}
+
+      /* ===== Banner sinkronisasi / status koneksi ===== */
+      .sync-banner{display:flex;align-items:center;gap:10px;padding:11px 15px;border-radius:14px;
+        font-size:13.5px;font-weight:500;margin-bottom:14px;border:1px solid var(--line);
+        animation:toast-in .35s var(--ease)}
+      .sync-banner b{font-weight:700}
+      .sync-banner.offline{background:rgba(214,158,46,.14);border-color:rgba(214,158,46,.42);color:#f0c88a}
+      .sync-banner.offline svg{color:#e6b25a;flex-shrink:0}
+      .sync-banner.syncing{background:rgba(56,161,199,.14);border-color:rgba(56,161,199,.4);color:#8fd0e6}
+      .sync-banner.syncing svg{color:#5fc0e0;flex-shrink:0}
+      .sync-banner.pending{background:rgba(214,158,46,.10);border-color:rgba(214,158,46,.32);color:#e8c887}
+      .sync-banner.pending svg{color:#e6b25a;flex-shrink:0}
+      .sync-banner.dead{background:rgba(224,90,90,.14);border-color:rgba(224,90,90,.45);color:#f0a0a0}
+      .sync-banner.dead svg{color:#e56b6b;flex-shrink:0}
+      .sync-retry{margin-left:auto;background:rgba(255,255,255,.08);color:inherit;border:1px solid var(--line);
+        padding:5px 12px;border-radius:999px;font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap}
+      .sync-retry:hover{background:rgba(255,255,255,.16)}
+      .spin{animation:spin 1s linear infinite}
+      @keyframes spin{to{transform:rotate(360deg)}}
 
       /* toast */
       .toast{position:fixed;top:20px;right:20px;background:rgba(27,37,33,.78);color:var(--ink);
