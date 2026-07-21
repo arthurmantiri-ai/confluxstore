@@ -48,6 +48,31 @@ const ID_MONTHS = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep"
 const periodLabel = (ym) => { if (!ym) return "-"; if (ym === "all") return "Semua waktu"; const [y, m] = String(ym).split("-").map(Number); return `${ID_MONTHS[(m || 1) - 1]} ${y}`; };
 const thisPeriod = () => new Date().toISOString().slice(0, 7);
 const prevPeriod = (ym) => { const [y, m] = String(ym).split("-").map(Number); const d = new Date(y, (m || 1) - 1, 1); d.setMonth(d.getMonth() - 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
+// ===== Kedaluwarsa (expire) batch — pelengkap FIFO, murni tampilan & peringatan =====
+const EXPIRY_WARN_DAYS = 30; // ambang "dekat kedaluwarsa" (hari). Ubah angkanya bila perlu.
+const daysUntil = (dateStr) => {
+  if (!dateStr) return null;
+  const d = new Date(dateStr + "T00:00:00");
+  if (isNaN(d)) return null;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return Math.round((d - today) / 86400000);
+};
+const expiryStatus = (dateStr) => {
+  const d = daysUntil(dateStr);
+  if (d == null) return null;
+  if (d < 0) return "expired";
+  if (d <= EXPIRY_WARN_DAYS) return "soon";
+  return "ok";
+};
+const fmtExpiry = (dateStr) =>
+  dateStr ? new Date(dateStr + "T00:00:00").toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }) : "";
+const expiryLabel = (dateStr) => {
+  const d = daysUntil(dateStr);
+  if (d == null) return "";
+  if (d < 0) return `Kedaluwarsa ${Math.abs(d)} hr lalu`;
+  if (d === 0) return "Kedaluwarsa hari ini";
+  return `Sisa ${d} hr`;
+};
 
 // Simpan sesi kasir (nama + jam mulai shift) di perangkat agar pulih otomatis
 // setelah reload pada HARI yang sama. Beda hari atau beda akun -> shift baru.
@@ -1135,7 +1160,7 @@ export default function App() {
     };
   }, [session]);
 
-  const recordMovement = async (productId, type, qty, note, unitCost) => {
+  const recordMovement = async (productId, type, qty, note, unitCost, expiry) => {
     qty = Number(qty) || 0;
     if (qty <= 0) { flash("Jumlah harus lebih dari 0"); return; }
     const prev = products.find((p) => p.id === productId);
@@ -1153,7 +1178,8 @@ export default function App() {
       if (type === "in") {
         // ATOMIK di server: riwayat + batch FIFO + kolom stok diperbarui dalam SATU transaksi (RPC stock_in).
         // Tidak mungkin lagi "pembelian tercatat tapi stok tidak berubah".
-        const st = await Products.stockIn(productId, qty, costIn, note);
+        // expiry (opsional) tersimpan langsung pada batch yang baru dibuat.
+        const st = await Products.stockIn(productId, qty, costIn, note, expiry || null);
         if (st != null) setProducts((ps) => ps.map((p) => (p.id === productId ? { ...p, stock: Number(st) } : p)));
       } else {
         // ATOMIK di server: riwayat + potong batch FIFO + kolom stok dalam SATU transaksi (RPC stock_out)
@@ -1726,7 +1752,7 @@ export default function App() {
           {view === "shiftlog" && managerMode && <ShiftLog flash={flash} />}
           {view === "stok" && (
             <Inventory products={products} movements={movements} pById={pById}
-              onMove={(pid, type, qty, note, cost) => { recordMovement(pid, type, qty, note, cost); flash(`Stok ${type === "in" ? "masuk" : "keluar"} dicatat`); }}
+              onMove={(pid, type, qty, note, cost, expiry) => { recordMovement(pid, type, qty, note, cost, expiry); flash(`Stok ${type === "in" ? "masuk" : "keluar"} dicatat`); }}
               onAdd={addProduct} onUpdate={updateProduct} onDelete={deleteProduct}
             />
           )}
@@ -2271,9 +2297,13 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
   const [qty, setQty] = useState(1);
   const [note, setNote] = useState("");
   const [buyCost, setBuyCost] = useState(0); // harga beli / satuan untuk stok masuk (batch FIFO)
+  const [buyExpiry, setBuyExpiry] = useState(""); // tanggal kedaluwarsa batch stok masuk (opsional)
   const [batches, setBatches] = useState(null); // batch aktif produk pada modal
   const [formFor, setFormFor] = useState(null); // {} = tambah, product = edit
   const [delFor, setDelFor] = useState(null);
+  const [expSummary, setExpSummary] = useState({}); // productId -> {date, status} batch aktif TERDEKAT kedaluwarsa
+  const [expTick, setExpTick] = useState(0);        // pemicu muat ulang batch modal + ringkasan lencana
+  const [savingExp, setSavingExp] = useState(null); // id batch yang tanggalnya sedang disimpan
 
   // Muat batch aktif (FIFO) produk yang sedang dibuka di modal
   useEffect(() => {
@@ -2284,7 +2314,40 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
       .then((b) => { if (alive) setBatches(b); })
       .catch(() => { if (alive) setBatches([]); });
     return () => { alive = false; };
-  }, [moveFor]);
+  }, [moveFor, expTick]);
+
+  // Ringkasan kedaluwarsa (lintas produk) untuk lencana di daftar stok.
+  // Hanya-baca & aman gagal: bila kolom/tabel belum siap, lencana sekadar kosong.
+  useEffect(() => {
+    if (!hasSupabase) { setExpSummary({}); return; }
+    let alive = true;
+    Batches.activeWithExpiry()
+      .then((rows) => {
+        if (!alive) return;
+        const m = {};
+        rows.forEach((r) => {
+          // rows sudah urut kedaluwarsa menaik → yang pertama per produk = paling dekat
+          if (!m[r.productId]) m[r.productId] = { date: r.expiryDate, status: expiryStatus(r.expiryDate) };
+        });
+        setExpSummary(m);
+      })
+      .catch(() => { if (alive) setExpSummary({}); });
+    return () => { alive = false; };
+  }, [expTick]);
+
+  // Simpan tanggal kedaluwarsa satu batch, lalu muat ulang tampilan (murni aditif)
+  const setBatchExpiry = async (batchId, dateStr) => {
+    if (!hasSupabase) return;
+    setSavingExp(batchId);
+    try {
+      await Batches.setExpiry(batchId, dateStr || null);
+      setExpTick((t) => t + 1); // muat ulang batch modal + ringkasan lencana
+    } catch (e) {
+      console.error("[expiry]", e);
+    } finally {
+      setSavingExp(null);
+    }
+  };
 
   const cats = ["all", ...Array.from(new Set(products.map((p) => p.category)))];
   const hasConsign = products.some((p) => p.isConsign);
@@ -2294,8 +2357,8 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
     return okQ && okF;
   });
 
-  const openMove = (p, type) => { setMoveFor(p); setMoveType(type); setQty(1); setBuyCost(p.cost || 0); setNote(type === "in" ? (p.isConsign ? "Terima barang titipan" : "Pembelian supplier") : "Penyesuaian"); };
-  const submitMove = () => { onMove(moveFor.id, moveType, Number(qty) || 0, note, moveType === "in" ? (Number(buyCost) || 0) : undefined); setMoveFor(null); };
+  const openMove = (p, type) => { setMoveFor(p); setMoveType(type); setQty(1); setBuyCost(p.cost || 0); setBuyExpiry(""); setNote(type === "in" ? (p.isConsign ? "Terima barang titipan" : "Pembelian supplier") : "Penyesuaian"); };
+  const submitMove = () => { onMove(moveFor.id, moveType, Number(qty) || 0, note, moveType === "in" ? (Number(buyCost) || 0) : undefined, moveType === "in" ? (buyExpiry || null) : undefined); setMoveFor(null); };
 
   return (
     <div className="stack">
@@ -2338,6 +2401,14 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
                   </div>
                   {p.sku && <div className="muted xs">SKU {p.sku}</div>}
                   {p.isConsign && p.supplier && <div className="muted xs">Milik {p.supplier}</div>}
+                  {expSummary[p.id] && expSummary[p.id].status !== "ok" && (
+                    <div className={`exp-badge ${expSummary[p.id].status}`}>
+                      <Calendar size={11} />
+                      {expSummary[p.id].status === "expired"
+                        ? "Ada stok kedaluwarsa"
+                        : `Dekat kedaluwarsa · ${fmtExpiry(expSummary[p.id].date)}`}
+                    </div>
+                  )}
                 </td>
                 <td className="muted">{p.category}</td>
                 <td className="r">
@@ -2400,6 +2471,17 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
                 <span className="hint">Dicatat sebagai batch FIFO baru. Harga modal terakhir: {rp(moveFor.cost)}</span>
               </label>
             )}
+            {moveType === "in" && (
+              <label className="fld">
+                <span>Tanggal kedaluwarsa <span className="muted">(opsional)</span></span>
+                <input type="date" className="batch-exp-input" style={{ width: "100%" }} value={buyExpiry} onChange={(e) => setBuyExpiry(e.target.value)} />
+                <span className="hint">
+                  {buyExpiry
+                    ? `Batch ini ${expiryLabel(buyExpiry).toLowerCase()}. Bisa diubah nanti di daftar batch.`
+                    : "Kosongkan bila tidak perlu. Bisa diisi/diubah kapan saja per batch di bawah."}
+                </span>
+              </label>
+            )}
             {moveType === "in" && moveFor.isConsign && (
               <div className="pay-note">
                 Barang <b>titip jual</b> milik {moveFor.supplier || "distributor"}: harga di atas = nilai setoran per {moveFor.unit || "satuan"}.
@@ -2412,16 +2494,38 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
             </label>
             {hasSupabase && (
               <div className="batch-box">
-                <div className="batch-title">Batch aktif · keluar dari yang paling lama (FIFO)</div>
+                <div className="batch-title">Batch aktif · urutan keluar otomatis</div>
+                <div className="muted xs" style={{ marginTop: -2 }}>Sistem mengeluarkan batch yang paling dekat kedaluwarsa lebih dulu (FEFO). Batch tanpa tanggal ikut urutan terlama (FIFO).</div>
                 {batches == null && <div className="muted xs">Memuat batch…</div>}
                 {batches != null && batches.length === 0 && <div className="muted xs">Belum ada batch aktif.</div>}
-                {batches != null && batches.map((b) => (
-                  <div key={b.id} className="batch-row">
-                    <span className="muted xs">{new Date(b.at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })}</span>
-                    <span className="tab">{num(b.qtyLeft)} {moveFor.unit}</span>
-                    <span className="tab">@ {rp(b.unitCost)}</span>
-                  </div>
-                ))}
+                {batches != null && batches.map((b) => {
+                  const est = expiryStatus(b.expiryDate);
+                  return (
+                    <div key={b.id} className="batch-item">
+                      <div className="batch-row">
+                        <span className="muted xs">{new Date(b.at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })}</span>
+                        <span className="tab">{num(b.qtyLeft)} {moveFor.unit}</span>
+                        <span className="tab">@ {rp(b.unitCost)}</span>
+                      </div>
+                      <div className="batch-exp">
+                        <span className="batch-exp-lbl"><Calendar size={12} /> Kedaluwarsa</span>
+                        <input
+                          type="date"
+                          className="batch-exp-input"
+                          value={b.expiryDate || ""}
+                          disabled={savingExp === b.id}
+                          onChange={(e) => setBatchExpiry(b.id, e.target.value)}
+                        />
+                        {b.expiryDate && est && est !== "ok" && (
+                          <span className={`exp-badge ${est}`}><AlertTriangle size={10} /> {expiryLabel(b.expiryDate)}</span>
+                        )}
+                        {b.expiryDate && est === "ok" && (
+                          <span className="muted xs">{expiryLabel(b.expiryDate)}</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -4598,6 +4702,18 @@ function Style() {
       .batch-title{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-faint)}
       .batch-row{display:flex;align-items:center;gap:10px;font-size:12.5px}
       .batch-row span:first-child{flex:1}
+      .batch-item{display:flex;flex-direction:column;gap:5px;padding:7px 0;border-top:1px solid var(--hair)}
+      .batch-item:first-of-type{border-top:none;padding-top:2px}
+      .batch-exp{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+      .batch-exp-lbl{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--ink-faint)}
+      .batch-exp-input{border:1px solid var(--line);background:var(--surface-2);color:var(--ink);font:inherit;font-size:12px;border-radius:7px;padding:3px 8px;outline:none}
+      .batch-exp-input:focus{border-color:var(--ink-faint)}
+      .batch-exp-input::-webkit-calendar-picker-indicator{filter:invert(.8);cursor:pointer}
+      .batch-exp-input:disabled{opacity:.5}
+      .exp-badge{display:inline-flex;align-items:center;gap:4px;margin-top:3px;font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:6px;line-height:1.5}
+      .exp-badge.expired{background:var(--crit-bg);color:var(--crit)}
+      .exp-badge.soon{background:var(--warn-bg);color:var(--warn)}
+      .exp-badge.ok{background:var(--ok-bg);color:var(--ok)}
       .acc-all{border:1px solid var(--line);background:transparent;color:var(--ink-soft);font:inherit;font-size:12.5px;font-weight:600;padding:5px 11px;border-radius:8px;cursor:pointer;transition:all .15s var(--ease)}
       .acc-all:hover{border-color:var(--ink-faint);color:var(--ink)}
       .acc-all.on{background:var(--accent-soft);border-color:transparent;color:var(--accent)}

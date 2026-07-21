@@ -61,9 +61,11 @@ export const Products = {
     if (error) throw error;
   },
   // Stok MASUK atomik: riwayat + batch FIFO + kolom stok dalam SATU transaksi server.
-  // Mengembalikan angka stok terbaru dari database.
-  async stockIn(id, qty, cost, note) {
-    const { data, error } = await supabase.rpc("stock_in", { p_id: id, p_qty: qty, p_cost: cost, p_note: note ?? null });
+  // Mengembalikan angka stok terbaru dari database. p_expiry opsional (YYYY-MM-DD/null).
+  async stockIn(id, qty, cost, note, expiry) {
+    const { data, error } = await supabase.rpc("stock_in", {
+      p_id: id, p_qty: qty, p_cost: cost, p_note: note ?? null, p_expiry: expiry ?? null,
+    });
     if (error) throw error;
     return data == null ? null : Number(data);
   },
@@ -119,6 +121,32 @@ export const Batches = {
     return data.map((r) => ({
       id: r.id, qtyIn: Number(r.qty_in), qtyLeft: Number(r.qty_left),
       unitCost: Number(r.unit_cost), note: r.note, at: r.created_at,
+      expiryDate: r.expiry_date || null, // tanggal kedaluwarsa batch (opsional; YYYY-MM-DD)
+    }));
+  },
+  // Set / ubah tanggal kedaluwarsa SATU batch (kirim null untuk mengosongkan).
+  // ADITIF murni: hanya menulis kolom expiry_date — TIDAK menyentuh qty, harga,
+  // maupun urutan konsumsi FIFO batch.
+  async setExpiry(batchId, dateStr) {
+    const { error } = await supabase.rpc("set_batch_expiry", {
+      p_batch: batchId, p_expiry: dateStr || null,
+    });
+    if (error) throw error;
+  },
+  // Semua batch aktif yang PUNYA tanggal kedaluwarsa (lintas produk), diurutkan
+  // dari yang paling dekat kedaluwarsa. Untuk lencana peringatan di daftar stok.
+  // Hanya-baca; jumlah baris kecil (hanya batch yang sudah ditandai).
+  async activeWithExpiry() {
+    const { data, error } = await supabase
+      .from("stock_batches")
+      .select("id, product_id, qty_left, expiry_date")
+      .gt("qty_left", 0)
+      .not("expiry_date", "is", null)
+      .order("expiry_date");
+    if (error) throw error;
+    return (data || []).map((r) => ({
+      id: r.id, productId: r.product_id,
+      qtyLeft: Number(r.qty_left), expiryDate: r.expiry_date || null,
     }));
   },
 };
