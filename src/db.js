@@ -272,6 +272,46 @@ export const Expenses = {
   async remove(id) { const { error } = await supabase.from("expenses").delete().eq("id", id); if (error) throw error; },
 };
 
+/* ===================== CASH DEPOSITS (setoran kas -> rekening) =====================
+   Catatan uang tunai yang diambil dari kas terkumpul lalu disetor/transfer ke
+   rekening bank. INI PINDAH ASET (Kas -> Bank), BUKAN biaya — tidak masuk laba-rugi.
+   Insert langsung seperti Expenses; tidak menyentuh shift/cocokan kas.            */
+const rowToDeposit = (r) => ({
+  id: r.id,
+  amount: Number(r.amount || 0),
+  depositedAt: r.deposited_at || null,   // 'YYYY-MM-DD'
+  account: r.account || "",              // rekening tujuan
+  note: r.note || "",
+  period: r.period || "",                // 'YYYY-MM' untuk filter periode
+});
+const depositToRow = (d) => ({
+  amount: Number(d.amount) || 0,
+  deposited_at: d.depositedAt || null,
+  account: d.account || null,
+  note: d.note || null,
+  period: d.period || null,
+});
+export const CashDeposits = {
+  async list() {
+    const { data, error } = await supabase.from("cash_deposits").select("*").order("deposited_at", { ascending: false });
+    if (error) throw error;
+    return data.map(rowToDeposit);
+  },
+  async create(d) {
+    const { data, error } = await supabase.from("cash_deposits").insert(depositToRow(d)).select().single();
+    if (error) throw error;
+    return rowToDeposit(data);
+  },
+  async update(id, d) {
+    const { error } = await supabase.from("cash_deposits").update(depositToRow(d)).eq("id", id);
+    if (error) throw error;
+  },
+  async remove(id) {
+    const { error } = await supabase.from("cash_deposits").delete().eq("id", id);
+    if (error) throw error;
+  },
+};
+
 /* ============================ SALES LOG ============================ */
 export const Sales = {
   // opts.sinceDays: batasi ke N hari terakhir (skala besar); opts.limit: batas baris

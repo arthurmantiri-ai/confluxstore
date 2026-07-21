@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { hasSupabase } from "./supabaseClient";
-import { Products, Batches, Movements, Orders as OrdersApi, Debts as DebtsApi, Capital, Expenses, Sales, Consign, Settings as SettingsApi, Auth, Profiles, Shifts } from "./db";
+import { Products, Batches, Movements, Orders as OrdersApi, Debts as DebtsApi, Capital, Expenses, CashDeposits, Sales, Consign, Settings as SettingsApi, Auth, Profiles, Shifts } from "./db";
 import {
   LayoutDashboard, Package, ShoppingCart, Globe, RefreshCcw,
   Plus, Minus, Search, X, Check, TrendingUp, ArrowUpRight, ArrowDownRight,
@@ -317,6 +317,8 @@ const SEED_EXPENSES = [
   { id: uid(), category: "Operasional", name: "Transport & pengiriman", amount: 1200000, date: "Bln ini" },
   { id: uid(), category: "Operasional", name: "Kemasan & ATK", amount: 900000, date: "Bln ini" },
 ];
+// Setoran kas ke rekening (mode lokal kosong; data asli dari tabel cash_deposits)
+const SEED_DEPOSITS = [];
 // Penjualan contoh per barang (± 1 bulan) untuk analisa
 const SEED_SALES_LOG = SEED_PRODUCTS.map((p) => {
   const qty = Math.max(1, Math.round(p.dailyUsage * 24));
@@ -890,6 +892,7 @@ export default function App() {
   const [debts, setDebts] = useState(SEED_DEBTS);
   const [capital, setCapital] = useState(SEED_CAPITAL);
   const [expenses, setExpenses] = useState(SEED_EXPENSES);
+  const [cashDeposits, setCashDeposits] = useState(SEED_DEPOSITS); // setoran kas -> rekening
   const [salesLog, setSalesLog] = useState(SEED_SALES_LOG);
   const [consigns, setConsigns] = useState([]); // buku kewajiban setor titip jual
   const [consignPayments, setConsignPayments] = useState([]); // riwayat setoran (pembayaran bertahap ke distributor)
@@ -932,9 +935,9 @@ export default function App() {
     const res = await Promise.allSettled([
       Products.list(), Movements.list(), OrdersApi.list(), DebtsApi.list(),
       Capital.list(), Expenses.list(), Sales.list({ sinceDays: 90 }), SettingsApi.get(),
-      Consign.list(), Consign.payments(),
+      Consign.list(), Consign.payments(), CashDeposits.list(),
     ]);
-    const [p, mv, od, dz, cap, exp, sl, st, cg, cp] = res;
+    const [p, mv, od, dz, cap, exp, sl, st, cg, cp, cd] = res;
     if (p.status === "fulfilled") { setProducts(p.value); dataReadyRef.current = true; }
     if (mv.status === "fulfilled") setMovements(mv.value);
     if (od.status === "fulfilled") setOrders(od.value);
@@ -944,6 +947,7 @@ export default function App() {
     if (sl.status === "fulfilled") setSalesLog(sl.value);
     if (cg.status === "fulfilled") setConsigns(cg.value);
     if (cp.status === "fulfilled") setConsignPayments(cp.value);
+    if (cd.status === "fulfilled") setCashDeposits(cd.value);
     if (st.status === "fulfilled" && st.value) setStore((s) => ({ ...s, ...st.value }));
     const failed = res.filter((r) => r.status === "rejected");
     if (failed.length) { console.error("[load]", failed.map((f) => f.reason)); flash("Sebagian data gagal dimuat — cek koneksi/akses"); }
@@ -1504,6 +1508,13 @@ export default function App() {
   };
   const updateExpense = (id, e) => { setExpenses((x) => x.map((y) => (y.id === id ? { ...y, ...e } : y))); persist(() => Expenses.update(id, e)); };
   const deleteExpense = (id) => { setExpenses((x) => x.filter((y) => y.id !== id)); persist(() => Expenses.remove(id)); };
+  // Setoran kas -> rekening (pindah aset, bukan biaya; tidak menyentuh laba/shift)
+  const addCashDeposit = async (d) => {
+    if (hasSupabase) { try { const row = await CashDeposits.create(d); setCashDeposits((x) => [row, ...x]); return; } catch (err) { console.error("[sync]", err); } }
+    setCashDeposits((x) => [{ id: uid(), ...d }, ...x]);
+  };
+  const updateCashDeposit = (id, d) => { setCashDeposits((x) => x.map((y) => (y.id === id ? { ...y, ...d } : y))); persist(() => CashDeposits.update(id, d)); };
+  const deleteCashDeposit = (id) => { setCashDeposits((x) => x.filter((y) => y.id !== id)); persist(() => CashDeposits.remove(id)); };
 
   const today = new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
   // Bangun objek bon + tampilkan seketika di daftar hutang, lalu KEMBALIKAN objeknya.
@@ -1854,9 +1865,10 @@ export default function App() {
           )}
           {view === "akuntansi" && (
             <Accounting
-              products={products} capital={capital} expenses={expenses} salesLog={salesLog} consigns={consigns} consignPayments={consignPayments} flash={flash}
+              products={products} capital={capital} expenses={expenses} salesLog={salesLog} consigns={consigns} consignPayments={consignPayments} cashDeposits={cashDeposits} flash={flash}
               onAddCapital={addCapital} onUpdateCapital={updateCapital} onDeleteCapital={deleteCapital}
               onAddExpense={addExpense} onUpdateExpense={updateExpense} onDeleteExpense={deleteExpense}
+              onAddDeposit={addCashDeposit} onUpdateDeposit={updateCashDeposit} onDeleteDeposit={deleteCashDeposit}
             />
           )}
         </div>
@@ -3984,8 +3996,9 @@ function Simulation({ products, onApply }) {
 
 /* ============================ Akuntansi (khusus manajer) ============================ */
 
-function Accounting({ products, capital, expenses, salesLog, consigns = [], consignPayments = [], flash, onAddCapital, onUpdateCapital, onDeleteCapital, onAddExpense, onUpdateExpense, onDeleteExpense }) {
+function Accounting({ products, capital, expenses, salesLog, consigns = [], consignPayments = [], cashDeposits = [], flash, onAddCapital, onUpdateCapital, onDeleteCapital, onAddExpense, onUpdateExpense, onDeleteExpense, onAddDeposit, onUpdateDeposit, onDeleteDeposit }) {
   const [form, setForm] = useState(null); // { kind:'capital'|'expense', entry }
+  const [depForm, setDepForm] = useState(null); // { entry } untuk setoran kas -> rekening
   const [del, setDel] = useState(null);
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const isAll = month === "all"; // periode "Semua waktu" (all time)
@@ -4035,6 +4048,13 @@ function Accounting({ products, capital, expenses, salesLog, consigns = [], cons
   const opex = monthExpenses.reduce((a, e) => a + e.amount, 0);
   const prevOpex = prevExpenses.reduce((a, e) => a + e.amount, 0);
   const net = gross - opex;
+  // Setoran kas -> rekening (periode terpilih). PINDAH ASET, tidak memengaruhi laba.
+  const depPeriod = (d) => d.period || String(d.depositedAt || "").slice(0, 7);
+  const monthDeposits = (isAll ? cashDeposits : cashDeposits.filter((d) => depPeriod(d) === month))
+    .slice().sort((a, b) => String(b.depositedAt || "").localeCompare(String(a.depositedAt || "")));
+  const depositTotal = monthDeposits.reduce((a, d) => a + (d.amount || 0), 0);
+  const lastAccount = (cashDeposits.find((d) => d.account) || {}).account || "";
+  const fmtDepDate = (s) => (s ? new Date(s + "T00:00:00").toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" }) : "—");
   // Nilai stok kini (MILIK TOKO, tanpa titipan): dari harga batch FIFO (server);
   // fallback stok × modal terbaru
   const [invValue, setInvValue] = useState(() => products.reduce((a, p) => a + (p.isConsign ? 0 : p.cost * p.stock), 0));
@@ -4314,6 +4334,25 @@ function Accounting({ products, capital, expenses, salesLog, consigns = [], cons
         }
       }
 
+      // ---------- Sheet: Setoran ke Rekening (Kas -> Bank) ----------
+      if (monthDeposits.length) {
+        const sD = wb.addWorksheet("Setoran ke Rekening");
+        sD.columns = [{ width: 16 }, { width: 30 }, { width: 30 }, { width: 18 }, { width: 12 }, { width: 12 }];
+        r = banner(sD, "Setoran Kas ke Rekening");
+        sectionTitle(sD, r, `SETORAN KAS \u2192 BANK — ${period}`); r++;
+        sD.mergeCells(r, 1, r, 6);
+        const nc = sD.getCell(r, 1);
+        nc.value = "Pindah aset (Kas \u2192 Bank) — bukan biaya, tidak memengaruhi laba/rugi.";
+        nc.font = { italic: true, size: 10, color: { argb: C.ink }, name: "Arial" };
+        nc.alignment = { vertical: "middle", horizontal: "left", indent: 1 };
+        sD.getRow(r).height = 18; r++;
+        headRow(sD, r, [{ h: "Tanggal" }, { h: "Rekening tujuan" }, { h: "Catatan" }, { h: "Jumlah", a: "right" }]); r++;
+        monthDeposits.forEach((d, idx) => dataRow(sD, r++, [
+          { v: fmtDepDate(d.depositedAt) }, { v: d.account || "—" }, { v: d.note || "—" }, { v: d.amount, a: "right", fmt: money },
+        ], idx));
+        totalRow(sD, r++, "TOTAL DISETOR (periode ini)", depositTotal, 3, C.teal);
+      }
+
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
       const url = URL.createObjectURL(blob);
@@ -4562,6 +4601,38 @@ function Accounting({ products, capital, expenses, salesLog, consigns = [], cons
         </section>
       </div>
 
+      <section className="card pad0">
+        <div className="card-head" style={{ padding: "18px 18px 0", flexWrap: "wrap", gap: 8 }}>
+          <h2><Landmark size={17} style={{ verticalAlign: "-3px", marginRight: 6, color: "var(--teal)" }} />Setoran Kas ke Rekening</h2>
+          <div className="row-actions" style={{ alignItems: "center", gap: 10 }}>
+            <span className="muted xs">{isAll ? "Total disetor (semua waktu)" : `Disetor ${periodLabel(month)}`}: <b className="tab" style={{ color: "var(--teal)" }}>{rp(depositTotal)}</b></span>
+            <button className="btn sm" onClick={() => setDepForm({ entry: null })}><Plus size={14} /> Catat setoran</button>
+          </div>
+        </div>
+        <div className="muted xs" style={{ padding: "8px 18px 0", lineHeight: 1.5 }}>
+          Uang tunai dari kas yang dipindah/transfer ke rekening bank. Ini <b style={{ color: "var(--teal)" }}>pindah aset (Kas → Bank)</b>, <b>bukan biaya</b> — tidak memengaruhi laba/rugi. Dicatat terpisah, setelah shift kasir ditutup.
+        </div>
+        <table className="tbl">
+          <thead><tr><th>Tanggal</th><th>Rekening</th><th>Catatan</th><th className="r">Jumlah</th><th className="r">Aksi</th></tr></thead>
+          <tbody>
+            {monthDeposits.map((d) => (
+              <tr key={d.id}>
+                <td className="tab">{fmtDepDate(d.depositedAt)}</td>
+                <td>{d.account ? <span className="strong">{d.account}</span> : <span className="muted">—</span>}</td>
+                <td className="muted">{d.note || "—"}</td>
+                <td className="r tab strong" style={{ color: "var(--teal)" }}>{rp(d.amount)}</td>
+                <td className="r"><div className="row-actions">
+                  <button className="icon-btn xs" onClick={() => setDepForm({ entry: d })}><Pencil size={14} /></button>
+                  <button className="icon-btn xs danger-h" onClick={() => setDel({ kind: "deposit", entry: d })}><Trash2 size={14} /></button>
+                </div></td>
+              </tr>
+            ))}
+            {monthDeposits.length === 0 && <tr><td colSpan={5} className="empty">{isAll ? "Belum ada setoran ke rekening tercatat." : <>Belum ada setoran untuk {periodLabel(month)}. Klik “Catat setoran” saat kas disetor ke bank.</>}</td></tr>}
+          </tbody>
+          <tfoot><tr><td className="strong" colSpan={3}>Total disetor</td><td className="r tab strong" style={{ color: "var(--teal)" }}>{rp(depositTotal)}</td><td /></tr></tfoot>
+        </table>
+      </section>
+
       {form && (
         <EntryForm
           kind={form.kind} entry={form.entry} defaultPeriod={isAll ? thisPeriod() : month}
@@ -4574,19 +4645,34 @@ function Accounting({ products, capital, expenses, salesLog, consigns = [], cons
         />
       )}
 
+      {depForm && (
+        <DepositForm
+          entry={depForm.entry} defaultAccount={lastAccount}
+          onClose={() => setDepForm(null)}
+          onSave={(data) => {
+            depForm.entry ? onUpdateDeposit(depForm.entry.id, data) : onAddDeposit(data);
+            setDepForm(null);
+          }}
+        />
+      )}
+
       <Modal
         open={!!del}
         onClose={() => setDel(null)}
-        title="Hapus entri?"
+        title={del?.kind === "deposit" ? "Hapus setoran?" : "Hapus entri?"}
         footer={<>
           <button className="btn ghost" onClick={() => setDel(null)}>Batal</button>
           <button className="btn danger" onClick={() => {
-            if (del.kind === "capital") onDeleteCapital(del.entry.id); else onDeleteExpense(del.entry.id);
+            if (del.kind === "capital") onDeleteCapital(del.entry.id);
+            else if (del.kind === "deposit") onDeleteDeposit(del.entry.id);
+            else onDeleteExpense(del.entry.id);
             setDel(null);
           }}><Trash2 size={15} /> Hapus</button>
         </>}
       >
-        {del && <p className="confirm-text">Hapus <b>{del.entry.name}</b> ({rp(del.entry.amount)})?</p>}
+        {del && (del.kind === "deposit"
+          ? <p className="confirm-text">Hapus setoran <b>{rp(del.entry.amount)}</b>{del.entry.account ? <> ke <b>{del.entry.account}</b></> : ""} ({fmtDepDate(del.entry.depositedAt)})?</p>
+          : <p className="confirm-text">Hapus <b>{del.entry.name}</b> ({rp(del.entry.amount)})?</p>)}
       </Modal>
     </div>
   );
@@ -4671,6 +4757,54 @@ function EntryForm({ kind, entry, defaultPeriod, onClose, onSave }) {
               <input value={f.date} onChange={(e) => set("date", e.target.value)} placeholder="cth. Modal awal" /></label>
           )}
         </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Form setoran kas -> rekening. Field: jumlah, tanggal, rekening tujuan, catatan.
+// Sengaja TERPISAH dari EntryForm (biaya/modal) supaya jelas ini bukan pengeluaran.
+function DepositForm({ entry, defaultAccount, onClose, onSave }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const [f, setF] = useState(entry || { amount: 0, depositedAt: today, account: defaultAccount || "", note: "" });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const amount = Number(f.amount) || 0;
+  const date = f.depositedAt || today;
+  const valid = amount > 0 && !!date;
+  const save = () => {
+    if (!valid) return;
+    onSave({
+      amount,
+      depositedAt: date,
+      account: String(f.account || "").trim(),
+      note: String(f.note || "").trim(),
+      period: String(date).slice(0, 7),
+    });
+  };
+  return (
+    <Modal
+      open onClose={onClose} width={460}
+      title={`${entry ? "Edit" : "Catat"} Setoran ke Rekening`}
+      footer={<>
+        <button className="btn ghost" onClick={onClose}>Batal</button>
+        <button className="btn" disabled={!valid} onClick={save}><Check size={15} /> Simpan</button>
+      </>}
+    >
+      <div className="form">
+        <div className="muted xs" style={{ lineHeight: 1.5, marginBottom: 2 }}>
+          Uang tunai dari kas yang dipindah ke rekening bank. <b style={{ color: "var(--teal)" }}>Bukan biaya</b> — hanya pindah tempat, tidak mengubah laba.
+        </div>
+        <div className="grid2">
+          <label className="fld"><span>Jumlah (Rp)</span>
+            <input inputMode="numeric" type="number" min="0" value={f.amount} onChange={(e) => set("amount", Math.max(0, Number(e.target.value)))} autoFocus /></label>
+          <label className="fld"><span>Tanggal setor</span>
+            <input type="date" value={date} onChange={(e) => e.target.value && set("depositedAt", e.target.value)} /></label>
+        </div>
+        <label className="fld"><span>Rekening tujuan</span>
+          <input value={f.account} onChange={(e) => set("account", e.target.value)} placeholder="cth. BCA 1234567890 a.n. Conflux" /></label>
+        <label className="fld"><span>Catatan (opsional)</span>
+          <input value={f.note} onChange={(e) => set("note", e.target.value)} placeholder="cth. setoran hasil 3 hari" /></label>
+        {amount > 0 && <div className="muted xs">Akan dicatat: <b style={{ color: "var(--teal)" }}>{rp(amount)}</b> disetor {new Date(date + "T00:00:00").toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" })}</div>}
       </div>
     </Modal>
   );
