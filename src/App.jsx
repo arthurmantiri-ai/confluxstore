@@ -891,7 +891,8 @@ export default function App() {
   const [capital, setCapital] = useState(SEED_CAPITAL);
   const [expenses, setExpenses] = useState(SEED_EXPENSES);
   const [salesLog, setSalesLog] = useState(SEED_SALES_LOG);
-  const [consigns, setConsigns] = useState([]); // buku setoran titip jual
+  const [consigns, setConsigns] = useState([]); // buku kewajiban setor titip jual
+  const [consignPayments, setConsignPayments] = useState([]); // riwayat setoran (pembayaran bertahap ke distributor)
   const [toast, setToast] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [role, setRole] = useState(null); // null = belum login, "cashier" | "manager"
@@ -931,9 +932,9 @@ export default function App() {
     const res = await Promise.allSettled([
       Products.list(), Movements.list(), OrdersApi.list(), DebtsApi.list(),
       Capital.list(), Expenses.list(), Sales.list({ sinceDays: 90 }), SettingsApi.get(),
-      Consign.list(),
+      Consign.list(), Consign.payments(),
     ]);
-    const [p, mv, od, dz, cap, exp, sl, st, cg] = res;
+    const [p, mv, od, dz, cap, exp, sl, st, cg, cp] = res;
     if (p.status === "fulfilled") { setProducts(p.value); dataReadyRef.current = true; }
     if (mv.status === "fulfilled") setMovements(mv.value);
     if (od.status === "fulfilled") setOrders(od.value);
@@ -942,6 +943,7 @@ export default function App() {
     if (exp.status === "fulfilled") setExpenses(exp.value);
     if (sl.status === "fulfilled") setSalesLog(sl.value);
     if (cg.status === "fulfilled") setConsigns(cg.value);
+    if (cp.status === "fulfilled") setConsignPayments(cp.value);
     if (st.status === "fulfilled" && st.value) setStore((s) => ({ ...s, ...st.value }));
     const failed = res.filter((r) => r.status === "rejected");
     if (failed.length) { console.error("[load]", failed.map((f) => f.reason)); flash("Sebagian data gagal dimuat — cek koneksi/akses"); }
@@ -1137,6 +1139,7 @@ export default function App() {
           // Titipan yang laku saat offline baru dibuat server ketika sinkron; tarik
           // ulang agar kewajiban setor ke distributor langsung tampak.
           Consign.list().then((cg) => setConsigns(cg)).catch(() => {});
+          Consign.payments().then((cp) => setConsignPayments(cp)).catch(() => {});
         }
       }
     })();
@@ -1301,13 +1304,44 @@ export default function App() {
     return true;
   };
 
-  // ===== Setoran titip jual: tandai lunas ke distributor =====
-  const settleConsigns = (ids) => {
-    if (!ids || ids.length === 0) return;
+  // ===== Setoran titip jual: pembayaran (bisa bertahap) ke distributor =====
+  // Jumlah yang disetor dialokasikan ke kewajiban TERTUA dulu (barang yang paling
+  // lama laku). Bisa bayar sebagian — sisanya tetap tercatat sebagai kewajiban.
+  const payConsign = (supplier, amount, note) => {
+    const sup = supplier || "";
     const paidAt = today;
-    setConsigns((cs) => cs.map((c) => (ids.includes(c.id) ? { ...c, status: "lunas", paidAt } : c)));
-    persist(() => Consign.settleMany(ids, paidAt));
-    flash("Setoran ke distributor dicatat lunas");
+    const amt = Math.max(0, Math.round(Number(amount) || 0));
+    if (amt <= 0) return;
+    // Optimistis: alokasi lokal (tertua dulu) supaya UI langsung berubah
+    setConsigns((cs) => {
+      const queue = cs
+        .filter((c) => (c.supplier || "") === sup && c.status === "belum" && c.amount > (c.paidAmount || 0))
+        .sort((a, b) => (a.ts || 0) - (b.ts || 0) || String(a.id).localeCompare(String(b.id)));
+      let rem = amt;
+      const patch = {};
+      for (const c of queue) {
+        if (rem <= 0) break;
+        const apply = Math.min(rem, c.amount - (c.paidAmount || 0));
+        const np = (c.paidAmount || 0) + apply;
+        patch[c.id] = np >= c.amount
+          ? { paidAmount: c.amount, status: "lunas", paidAt }
+          : { paidAmount: np };
+        rem -= apply;
+      }
+      return cs.map((c) => (patch[c.id] ? { ...c, ...patch[c.id] } : c));
+    });
+    // Optimistis: catat baris riwayat setoran
+    const tempId = uid();
+    setConsignPayments((ps) => [{ id: tempId, supplier: sup, amount: amt, paidAt, note: note || "", ts: Date.now() }, ...ps]);
+    flash(`Setoran ${rp(amt)} ke ${sup || "distributor"} dicatat`);
+    // Simpan ke server + selaraskan dengan kondisi resmi database (alokasi otoritatif)
+    if (hasSupabase) {
+      persist(async () => {
+        await Consign.pay(sup, amt, paidAt, note || null);
+        const [cg, cp] = await Promise.all([Consign.list(), Consign.payments()]);
+        setConsigns(cg); setConsignPayments(cp);
+      });
+    }
   };
 
   const logout = () => { if (hasSupabase) Auth.signOut(); clearCashierSession(); setRole(null); setSidebarOpen(false); setShiftReport(null); setShift(null); setShiftCashMoves([]); setShiftCash(""); setShiftNote(""); setCashierName(""); loadedRef.current = false; };
@@ -1813,14 +1847,14 @@ export default function App() {
               onDelete={managerMode ? deleteDebt : null} />
           )}
           {view === "titipjual" && (
-            <ConsignView products={products} consigns={consigns} onSettle={settleConsigns} setView={setView} />
+            <ConsignView products={products} consigns={consigns} payments={consignPayments} onPay={payConsign} setView={setView} />
           )}
           {view === "simulasi" && (
             <Simulation products={products} onApply={applySimulation} />
           )}
           {view === "akuntansi" && (
             <Accounting
-              products={products} capital={capital} expenses={expenses} salesLog={salesLog} consigns={consigns} flash={flash}
+              products={products} capital={capital} expenses={expenses} salesLog={salesLog} consigns={consigns} consignPayments={consignPayments} flash={flash}
               onAddCapital={addCapital} onUpdateCapital={updateCapital} onDeleteCapital={deleteCapital}
               onAddExpense={addExpense} onUpdateExpense={updateExpense} onDeleteExpense={deleteExpense}
             />
@@ -3501,15 +3535,18 @@ function Debts({ debts, onSettle, onPrint, onDelete }) {
 
 /* ============================ Titip Jual (Konsinyasi) ============================ */
 
-function ConsignView({ products, consigns, onSettle, setView }) {
+function ConsignView({ products, consigns, payments = [], onPay, setView }) {
   const [tab, setTab] = useState("belum");
-  const [confirm, setConfirm] = useState(null); // { supplier, rows, total, qty }
+  const [confirm, setConfirm] = useState(null); // grup distributor terpilih untuk setoran
+  const [payAmt, setPayAmt] = useState("");     // jumlah setoran (Rp) yang diketik
+  const [payNote, setPayNote] = useState("");   // catatan setoran (opsional)
   const consignProducts = products.filter((p) => p.isConsign);
 
+  const rem = (c) => c.amount - (c.paidAmount || 0);      // sisa yang belum disetor per baris
   const belum = consigns.filter((c) => c.status === "belum");
-  const lunas = consigns.filter((c) => c.status === "lunas");
-  const owed = belum.reduce((a, c) => a + c.amount, 0);
-  const paidTotal = lunas.reduce((a, c) => a + c.amount, 0);
+  const owed = belum.reduce((a, c) => a + rem(c), 0);     // total sisa kewajiban
+  const paidTotal = consigns.reduce((a, c) => a + (c.paidAmount || 0), 0); // total yang sudah disetor
+  const payHistory = useMemo(() => [...payments].sort((a, b) => (b.ts || 0) - (a.ts || 0)), [payments]);
 
   // Nilai stok titipan (milik distributor) — server RPC, fallback hitung lokal
   const [consignStock, setConsignStock] = useState(0);
@@ -3524,15 +3561,21 @@ function ConsignView({ products, consigns, onSettle, setView }) {
     return () => { alive = false; };
   }, [products]);
 
-  // Kelompokkan kewajiban setor per distributor
+  // Kelompokkan sisa kewajiban setor per distributor
+  // supplier = kunci mentah (sesuai DB, "" untuk tanpa nama) → dipakai saat setor
+  // label   = teks tampilan
   const bySupplier = useMemo(() => {
     const m = {};
     belum.forEach((c) => {
-      const k = c.supplier || "Tanpa nama distributor";
-      if (!m[k]) m[k] = { supplier: k, rows: [], total: 0, qty: 0 };
-      m[k].rows.push(c); m[k].total += c.amount; m[k].qty += c.qty;
+      const key = c.supplier || "";
+      if (!m[key]) m[key] = { supplier: key, label: c.supplier || "Tanpa nama distributor", rows: [], remaining: 0, full: 0, paid: 0, qty: 0 };
+      m[key].rows.push(c);
+      m[key].remaining += rem(c);
+      m[key].full += c.amount;
+      m[key].paid += (c.paidAmount || 0);
+      m[key].qty += c.qty;
     });
-    return Object.values(m).sort((a, b) => b.total - a.total);
+    return Object.values(m).sort((a, b) => b.remaining - a.remaining);
   }, [consigns]);
 
   const fmtTs = (ts) => ts ? new Date(ts).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
@@ -3540,7 +3583,7 @@ function ConsignView({ products, consigns, onSettle, setView }) {
   return (
     <div className="stack">
       <div className="grid-4">
-        <Stat icon={Handshake} accent label="Belum disetor" value={rp(owed)} sub={`${belum.length} barang laku`} />
+        <Stat icon={Handshake} accent label="Sisa belum disetor" value={rp(owed)} sub={`${belum.length} item belum lunas`} />
         <Stat icon={Boxes} label="Nilai stok titipan" value={rp(consignStock)} sub="milik distributor" />
         <Stat icon={Package} label="Barang titipan" value={num(consignProducts.length)} sub="jenis barang" />
         <Stat icon={CheckCircle2} label="Sudah disetor" value={rp(paidTotal)} sub="sepanjang waktu" />
@@ -3548,14 +3591,15 @@ function ConsignView({ products, consigns, onSettle, setView }) {
 
       <div className="pay-note">
         <b>Cara kerjanya:</b> barang bertanda titip jual milik distributor — begitu laku, nilai setorannya (sebesar HPP) otomatis
-        tercatat di sini. Setoran ini <b>bukan</b> biaya operasional baru karena modalnya sudah terhitung sebagai HPP di laporan
-        laba-rugi, jadi tidak dihitung dua kali.
+        tercatat di sini. Setoran <b>bisa dicicil</b>: bayar sebagian dulu, sisanya tetap tercatat sebagai kewajiban sampai lunas.
+        Setoran ini <b>bukan</b> biaya operasional baru karena modalnya sudah terhitung sebagai HPP di laporan laba-rugi, jadi tidak
+        dihitung dua kali.
       </div>
 
       <div className="order-tabs">
-        {[["belum", "Belum Disetor"], ["lunas", "Riwayat Setoran"]].map(([k, label]) => (
+        {[["belum", "Belum Disetor", bySupplier.length], ["lunas", "Riwayat Setoran", payHistory.length]].map(([k, label, count]) => (
           <button key={k} className={`order-tab ${tab === k ? "on" : ""}`} onClick={() => setTab(k)}>
-            {label} {(k === "belum" ? belum : lunas).length > 0 && <span className="tab-count">{(k === "belum" ? belum : lunas).length}</span>}
+            {label} {count > 0 && <span className="tab-count">{count}</span>}
           </button>
         ))}
       </div>
@@ -3573,23 +3617,30 @@ function ConsignView({ products, consigns, onSettle, setView }) {
             </div>
           )}
           {bySupplier.map((g) => (
-            <div key={g.supplier} className="card debt-card">
+            <div key={g.supplier || "—"} className="card debt-card">
               <div className="sup-head">
-                <div className="sup-name"><Handshake size={15} /> {g.supplier}</div>
+                <div className="sup-name"><Handshake size={15} /> {g.label}</div>
                 <span className="pill pill-warn">{g.rows.length} item</span>
               </div>
               <div className="sup-rows">
                 {g.rows.map((c) => (
                   <div key={c.id} className="sup-row">
-                    <span>{c.productName} <span className="muted xs">× {num(c.qty)}</span></span>
+                    <span>{c.productName} <span className="muted xs">× {num(c.qty)}</span>
+                      {(c.paidAmount || 0) > 0 && <span className="part-pill">sebagian</span>}
+                    </span>
                     <span className="muted xs">{fmtTs(c.ts)}</span>
-                    <span className="tab">{rp(c.amount)}</span>
+                    <span className="tab">{rp(rem(c))}</span>
                   </div>
                 ))}
               </div>
               <div className="sup-foot">
-                <div className="debt-total"><span className="muted xs">Total setoran</span><span className="tab">{rp(g.total)}</span></div>
-                <button className="btn sm" onClick={() => setConfirm(g)}><CheckCircle2 size={15} /> Catat setoran</button>
+                <div className="debt-total">
+                  <span className="muted xs">{g.paid > 0 ? `Sisa · terbayar ${rp(g.paid)} dari ${rp(g.full)}` : "Sisa setoran"}</span>
+                  <span className="tab">{rp(g.remaining)}</span>
+                </div>
+                <button className="btn sm" onClick={() => { setConfirm(g); setPayAmt(String(g.remaining)); setPayNote(""); }}>
+                  <CheckCircle2 size={15} /> Catat setoran
+                </button>
               </div>
             </div>
           ))}
@@ -3600,20 +3651,18 @@ function ConsignView({ products, consigns, onSettle, setView }) {
         <section className="card pad0">
           <table className="tbl">
             <thead>
-              <tr><th>Terjual</th><th>Barang</th><th>Distributor</th><th className="r">Qty</th><th className="r">Setoran</th><th>Dibayar</th></tr>
+              <tr><th>Tanggal</th><th>Distributor</th><th className="r">Disetor</th><th>Catatan</th></tr>
             </thead>
             <tbody>
-              {lunas.length === 0 && (
-                <tr><td colSpan={6}><div className="empty">Belum ada riwayat setoran.</div></td></tr>
+              {payHistory.length === 0 && (
+                <tr><td colSpan={4}><div className="empty">Belum ada riwayat setoran.</div></td></tr>
               )}
-              {lunas.map((c) => (
-                <tr key={c.id}>
-                  <td className="muted">{fmtTs(c.ts)}</td>
-                  <td><div className="strong">{c.productName}</div></td>
-                  <td className="muted">{c.supplier || "—"}</td>
-                  <td className="r tab">{num(c.qty)}</td>
-                  <td className="r tab">{rp(c.amount)}</td>
-                  <td><span className="done-tag"><Check size={14} /> {c.paidAt || "—"}</span></td>
+              {payHistory.map((p) => (
+                <tr key={p.id}>
+                  <td><span className="done-tag"><Check size={14} /> {p.paidAt || fmtTs(p.ts)}</span></td>
+                  <td><div className="strong">{p.supplier || "Tanpa nama distributor"}</div></td>
+                  <td className="r tab">{rp(p.amount)}</td>
+                  <td className="muted">{p.note || "—"}</td>
                 </tr>
               ))}
             </tbody>
@@ -3628,21 +3677,54 @@ function ConsignView({ products, consigns, onSettle, setView }) {
         footer={
           <>
             <button className="btn ghost" onClick={() => setConfirm(null)}>Batal</button>
-            <button className="btn" onClick={() => { onSettle(confirm.rows.map((r) => r.id)); setConfirm(null); }}>
-              <CheckCircle2 size={15} /> Ya, sudah disetor
+            <button
+              className="btn"
+              disabled={!confirm || Math.round(Number(payAmt) || 0) <= 0}
+              onClick={() => {
+                if (!confirm) return;
+                const amt = Math.min(Math.round(Number(payAmt) || 0), confirm.remaining);
+                if (amt > 0) onPay(confirm.supplier, amt, payNote.trim());
+                setConfirm(null);
+              }}
+            >
+              <CheckCircle2 size={15} /> Simpan setoran
             </button>
           </>
         }
       >
-        {confirm && (
-          <div className="confirm-text">
-            <p style={{ margin: "0 0 8px" }}>
-              Tandai setoran ke <b>{confirm.supplier}</b> sebesar <b>{rp(confirm.total)}</b> ({confirm.rows.length} item,{" "}
-              {num(confirm.qty)} barang) sebagai <b>sudah dibayar</b>?
-            </p>
-            <div className="pay-note">Pastikan uangnya sudah benar-benar diserahkan/ditransfer ke distributor sebelum menandai lunas.</div>
-          </div>
-        )}
+        {confirm && (() => {
+          const typed = Math.max(0, Math.round(Number(payAmt) || 0));
+          const amt = Math.min(typed, confirm.remaining);
+          const sisa = confirm.remaining - amt;
+          const over = typed > confirm.remaining;
+          return (
+            <div className="stack-sm">
+              <div className="pay-summary">
+                <div className="pay-summary-row"><span>Distributor</span><b>{confirm.label}</b></div>
+                <div className="pay-summary-row"><span>Sisa kewajiban</span><b className="tab">{rp(confirm.remaining)}</b></div>
+              </div>
+              <label className="fld">
+                <span>Jumlah disetor sekarang (Rp)</span>
+                <input type="number" inputMode="numeric" value={payAmt} onChange={(e) => setPayAmt(e.target.value)} autoFocus />
+                <div className="amt-quick">
+                  <button type="button" className="chip" onClick={() => setPayAmt(String(confirm.remaining))}>Bayar penuh</button>
+                  <button type="button" className="chip" onClick={() => setPayAmt(String(Math.round(confirm.remaining / 2)))}>Setengah</button>
+                </div>
+                {over && <span className="warn-hint">Melebihi sisa — otomatis dibatasi ke {rp(confirm.remaining)}.</span>}
+              </label>
+              <label className="fld">
+                <span>Catatan <span className="muted">(opsional)</span></span>
+                <input value={payNote} onChange={(e) => setPayNote(e.target.value)} placeholder="cth. transfer BCA / bayar tunai" />
+              </label>
+              <div className="pay-note">
+                Setoran <b>{rp(amt)}</b> dialokasikan ke barang yang <b>paling lama laku</b> lebih dulu.{" "}
+                {sisa > 0
+                  ? <>Sisa <b>{rp(sisa)}</b> tetap tercatat sebagai kewajiban ke {confirm.label}.</>
+                  : <>Kewajiban ke {confirm.label} menjadi <b>lunas</b>. 🎉</>}
+              </div>
+            </div>
+          );
+        })()}
       </Modal>
     </div>
   );
@@ -3902,7 +3984,7 @@ function Simulation({ products, onApply }) {
 
 /* ============================ Akuntansi (khusus manajer) ============================ */
 
-function Accounting({ products, capital, expenses, salesLog, consigns = [], flash, onAddCapital, onUpdateCapital, onDeleteCapital, onAddExpense, onUpdateExpense, onDeleteExpense }) {
+function Accounting({ products, capital, expenses, salesLog, consigns = [], consignPayments = [], flash, onAddCapital, onUpdateCapital, onDeleteCapital, onAddExpense, onUpdateExpense, onDeleteExpense }) {
   const [form, setForm] = useState(null); // { kind:'capital'|'expense', entry }
   const [del, setDel] = useState(null);
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
@@ -3967,7 +4049,7 @@ function Accounting({ products, capital, expenses, salesLog, consigns = [], flas
 
   // ===== Titip jual (konsinyasi) =====
   const hasConsign = consigns.length > 0 || products.some((p) => p.isConsign);
-  const consignOwed = consigns.filter((c) => c.status === "belum").reduce((a, c) => a + c.amount, 0);
+  const consignOwed = consigns.filter((c) => c.status === "belum").reduce((a, c) => a + (c.amount - (c.paidAmount || 0)), 0);
   const [consignValue, setConsignValue] = useState(0);
   useEffect(() => {
     const local = products.reduce((a, p) => a + (p.isConsign ? (p.cost || 0) * (p.stock || 0) : 0), 0);
@@ -4194,19 +4276,42 @@ function Accounting({ products, capital, expenses, salesLog, consigns = [], flas
         const cRows = consigns
           .filter((c) => c.ts == null || (c.ts >= cFrom && c.ts < cTo))
           .sort((a, b) => (b.ts || 0) - (a.ts || 0));
-        const cOwedP = cRows.filter((c) => c.status === "belum").reduce((a, c) => a + c.amount, 0);
+        const cOwedP = cRows.filter((c) => c.status === "belum").reduce((a, c) => a + (c.amount - (c.paidAmount || 0)), 0);
         const s5 = wb.addWorksheet("Titip Jual");
-        s5.columns = [{ width: 16 }, { width: 32 }, { width: 22 }, { width: 10 }, { width: 16 }, { width: 22 }];
+        s5.columns = [{ width: 15 }, { width: 30 }, { width: 20 }, { width: 8 }, { width: 15 }, { width: 15 }, { width: 15 }, { width: 18 }];
         r = banner(s5, "Titip Jual (Konsinyasi)");
         sectionTitle(s5, r, `SETORAN TITIP JUAL — ${period}`); r++;
-        headRow(s5, r, [{ h: "Terjual" }, { h: "Barang" }, { h: "Distributor" }, { h: "Qty", a: "right" }, { h: "Setoran", a: "right" }, { h: "Status" }]); r++;
-        cRows.forEach((c, idx) => dataRow(s5, r++, [
-          { v: c.ts ? new Date(c.ts).toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" }) : "—" },
-          { v: c.productName }, { v: c.supplier || "—" }, { v: c.qty, a: "right" },
-          { v: c.amount, a: "right", fmt: money },
-          { v: c.status === "lunas" ? `Lunas${c.paidAt ? " · " + c.paidAt : ""}` : "Belum disetor" },
-        ], idx));
-        totalRow(s5, r++, "BELUM DISETOR (periode ini)", cOwedP, 4, C.coral);
+        headRow(s5, r, [{ h: "Terjual" }, { h: "Barang" }, { h: "Distributor" }, { h: "Qty", a: "right" }, { h: "Setoran", a: "right" }, { h: "Terbayar", a: "right" }, { h: "Sisa", a: "right" }, { h: "Status" }]); r++;
+        cRows.forEach((c, idx) => {
+          const paid = c.paidAmount || 0;
+          const sisa = c.amount - paid;
+          dataRow(s5, r++, [
+            { v: c.ts ? new Date(c.ts).toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" }) : "—" },
+            { v: c.productName }, { v: c.supplier || "—" }, { v: c.qty, a: "right" },
+            { v: c.amount, a: "right", fmt: money },
+            { v: paid, a: "right", fmt: money },
+            { v: sisa, a: "right", fmt: money },
+            { v: c.status === "lunas" ? `Lunas${c.paidAt ? " · " + c.paidAt : ""}` : (paid > 0 ? "Sebagian disetor" : "Belum disetor") },
+          ], idx);
+        });
+        totalRow(s5, r++, "SISA BELUM DISETOR (periode ini)", cOwedP, 6, C.coral);
+
+        // Riwayat setoran (pembayaran bertahap) dalam periode
+        const pRows = (consignPayments || [])
+          .filter((p) => p.ts == null || (p.ts >= cFrom && p.ts < cTo))
+          .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+        if (pRows.length) {
+          r++;
+          sectionTitle(s5, r, `RIWAYAT SETORAN — ${period}`); r++;
+          headRow(s5, r, [{ h: "Tanggal" }, { h: "Distributor" }, { h: "" }, { h: "" }, { h: "Disetor", a: "right" }, { h: "" }, { h: "" }, { h: "Catatan" }]); r++;
+          pRows.forEach((p, idx) => dataRow(s5, r++, [
+            { v: p.paidAt || (p.ts ? new Date(p.ts).toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" }) : "—") },
+            { v: p.supplier || "—" }, { v: "" }, { v: "" },
+            { v: p.amount, a: "right", fmt: money }, { v: "" }, { v: "" },
+            { v: p.note || "—" },
+          ], idx));
+          totalRow(s5, r++, "TOTAL DISETOR (periode ini)", pRows.reduce((a, p) => a + p.amount, 0), 6, C.ok);
+        }
       }
 
       const buf = await wb.xlsx.writeBuffer();
@@ -5110,6 +5215,14 @@ function Style() {
       .sup-foot{display:flex;justify-content:space-between;align-items:center;gap:10px;border-top:1px dashed var(--line-soft);margin-top:11px;padding-top:11px}
       .link-btn{background:none;border:none;padding:0;font:inherit;font-weight:700;color:var(--teal);cursor:pointer;text-decoration:underline}
       .link-btn:hover{color:var(--ink)}
+      .part-pill{display:inline-block;margin-left:6px;font-size:9.5px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;
+        color:var(--gold);background:rgba(224,165,60,.14);padding:1px 6px;border-radius:999px;vertical-align:1px}
+      .stack-sm{display:flex;flex-direction:column;gap:12px}
+      .pay-summary{background:var(--surface-2);border-radius:9px;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+      .pay-summary-row{display:flex;justify-content:space-between;align-items:center;font-size:13px;color:var(--ink-soft)}
+      .pay-summary-row b{color:var(--ink)}
+      .amt-quick{display:flex;gap:6px;margin-top:2px}
+      .warn-hint{font-size:11.5px;color:var(--warn)}
 
       /* ===== Ringkasan Shift ===== */
       .shift{display:flex;flex-direction:column;gap:14px}

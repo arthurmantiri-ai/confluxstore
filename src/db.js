@@ -360,7 +360,14 @@ const rowToConsign = (r) => ({
   id: r.id, productId: r.product_id, productName: r.product_name || "—",
   supplier: r.supplier || "", txnId: r.txn_id || null,
   qty: Number(r.qty), amount: Number(r.amount),
+  paidAmount: Number(r.paid_amount || 0), // sudah disetor sebagian (setoran bertahap)
   status: r.status || "belum", paidAt: r.paid_at || null,
+  ts: r.created_at ? Date.parse(r.created_at) : null,
+});
+// Riwayat setoran (tiap pembayaran ke distributor = satu baris)
+const rowToConsignPay = (r) => ({
+  id: r.id, supplier: r.supplier || "", amount: Number(r.amount),
+  paidAt: r.paid_at || null, note: r.note || "",
   ts: r.created_at ? Date.parse(r.created_at) : null,
 });
 export const Consign = {
@@ -378,11 +385,27 @@ export const Consign = {
     if (error) throw error;
     return rowToConsign(data);
   },
-  // Tandai beberapa baris sudah disetor ke distributor
+  // Tandai beberapa baris sudah disetor penuh ke distributor (fallback lama)
   async settleMany(ids, paidAt) {
     const { error } = await supabase.from("consign_ledger")
       .update({ status: "lunas", paid_at: paidAt }).in("id", ids);
     if (error) throw error;
+  },
+  // Setoran bertahap ke distributor. Jumlah dialokasikan otomatis ke kewajiban
+  // TERTUA dulu (barang yang paling lama laku), atomik di server via RPC.
+  async pay(supplier, amount, paidAt, note) {
+    const { data, error } = await supabase.rpc("consign_pay", {
+      p_supplier: supplier || "", p_amount: amount,
+      p_paid_at: paidAt || null, p_note: note || null,
+    });
+    if (error) throw error;
+    return data; // { payment_id, paid, allocated }
+  },
+  // Riwayat setoran (buku pembayaran ke distributor)
+  async payments() {
+    const { data, error } = await supabase.from("consign_payments").select("*").order("created_at", { ascending: false });
+    if (error) throw error;
+    return (data || []).map(rowToConsignPay);
   },
 };
 
