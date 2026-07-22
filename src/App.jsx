@@ -73,6 +73,15 @@ const expiryLabel = (dateStr) => {
   if (d === 0) return "Kedaluwarsa hari ini";
   return `Sisa ${d} hr`;
 };
+// ISO/epoch -> "YYYY-MM-DD" pada zona waktu LOKAL (agar cocok dengan tanggal yang
+// ditampilkan via toLocaleDateString; input <type=date> selalu memakai kalender lokal).
+const toLocalYMD = (v) => {
+  if (!v) return "";
+  const d = new Date(v);
+  if (isNaN(d)) return "";
+  const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, "0"), day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
 
 // Simpan sesi kasir (nama + jam mulai shift) di perangkat agar pulih otomatis
 // setelah reload pada HARI yang sama. Beda hari atau beda akun -> shift baru.
@@ -1799,6 +1808,8 @@ export default function App() {
             <Inventory products={products} movements={movements} pById={pById}
               onMove={(pid, type, qty, note, cost, expiry) => { recordMovement(pid, type, qty, note, cost, expiry); flash(`Stok ${type === "in" ? "masuk" : "keluar"} dicatat`); }}
               onAdd={addProduct} onUpdate={updateProduct} onDelete={deleteProduct}
+              onStockChange={(pid, newStock) => setProducts((ps) => ps.map((p) => (p.id === pid ? { ...p, stock: newStock } : p)))}
+              onFlash={flash}
             />
           )}
           {view === "kasir" && (
@@ -2335,7 +2346,7 @@ function SalesHistory({ salesLog, products, managerMode, onPrint, onVoid }) {
 
 /* ============================ Inventory / Stok ============================ */
 
-function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDelete }) {
+function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDelete, onStockChange, onFlash }) {
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState("all");
   const [moveFor, setMoveFor] = useState(null);
@@ -2350,6 +2361,16 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
   const [expSummary, setExpSummary] = useState({}); // productId -> {date, status} batch aktif TERDEKAT kedaluwarsa
   const [expTick, setExpTick] = useState(0);        // pemicu muat ulang batch modal + ringkasan lencana
   const [savingExp, setSavingExp] = useState(null); // id batch yang tanggalnya sedang disimpan
+  const [expDraft, setExpDraft] = useState({});     // draft tanggal kedaluwarsa per batch (ketik lokal; simpan saat blur)
+  // ===== Kelola batch (edit/hapus per batch) =====
+  const [batchFor, setBatchFor] = useState(null);    // produk yang dibuka di modal kelola batch
+  const [allBatches, setAllBatches] = useState(null); // semua batch produk (incl. sisa 0)
+  const [batchTick, setBatchTick] = useState(0);      // pemicu muat ulang daftar kelola batch
+  const [editBatchId, setEditBatchId] = useState(null); // id batch yang sedang diedit inline
+  const [bDraft, setBDraft] = useState(null);         // nilai form edit batch
+  const [savingBatch, setSavingBatch] = useState(false);
+  const [delBatchId, setDelBatchId] = useState(null); // batch menunggu konfirmasi hapus
+  const [batchErr, setBatchErr] = useState("");
 
   // Muat batch aktif (FIFO) produk yang sedang dibuka di modal
   useEffect(() => {
@@ -2392,6 +2413,100 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
       console.error("[expiry]", e);
     } finally {
       setSavingExp(null);
+    }
+  };
+
+  // Simpan tanggal kedaluwarsa hanya saat input SELESAI diisi (blur / tekan Enter),
+  // BUKAN tiap ketikan — supaya bisa diketik lewat keyboard tanpa terputus reload.
+  const commitBatchExpiry = async (batchId, val, current) => {
+    if ((val || "") === (current || "")) {                       // tak ada perubahan → jangan menulis
+      setExpDraft((m) => { const n = { ...m }; delete n[batchId]; return n; });
+      return;
+    }
+    await setBatchExpiry(batchId, val || null);                  // menulis + muat ulang (expTick)
+    setExpDraft((m) => { const n = { ...m }; delete n[batchId]; return n; }); // lepas draft → tampilkan nilai server
+  };
+
+  // Muat SEMUA batch (incl. sisa 0) untuk modal kelola batch
+  useEffect(() => {
+    if (!batchFor || !hasSupabase) { setAllBatches(null); return; }
+    let alive = true;
+    setAllBatches(null);
+    Batches.listAll(batchFor.id)
+      .then((b) => { if (alive) setAllBatches(b); })
+      .catch(() => { if (alive) setAllBatches([]); });
+    return () => { alive = false; };
+  }, [batchFor, batchTick]);
+
+  const openBatch = (p) => { setBatchFor(p); setEditBatchId(null); setBDraft(null); setDelBatchId(null); setBatchErr(""); };
+  const closeBatch = () => { setBatchFor(null); setEditBatchId(null); setBDraft(null); setDelBatchId(null); setBatchErr(""); };
+
+  // Buka form edit untuk satu batch (prefill nilai saat ini)
+  const startEditBatch = (b) => {
+    setDelBatchId(null);
+    setBatchErr("");
+    const recv = toLocalYMD(b.at); // tanggal LOKAL, konsisten dengan yang tampil di kartu
+    setBDraft({
+      origReceived: recv,          // untuk deteksi apakah tanggal diubah
+      received: recv,
+      qtyIn: String(b.qtyIn),
+      qtyLeft: String(b.qtyLeft),
+      unitCost: String(b.unitCost),
+      expiryDate: b.expiryDate || "",
+      note: b.note || "",
+    });
+    setEditBatchId(b.id);
+  };
+
+  // Simpan koreksi batch → server rekonsiliasi stok produk
+  const saveBatch = async () => {
+    if (!bDraft || !batchFor) return;
+    const qtyIn = Number(bDraft.qtyIn), qtyLeft = Number(bDraft.qtyLeft), cost = Number(bDraft.unitCost);
+    if (![qtyIn, qtyLeft, cost].every((n) => Number.isFinite(n) && n >= 0)) { setBatchErr("Angka tidak boleh kosong atau negatif."); return; }
+    if (qtyLeft > qtyIn) { setBatchErr("Sisa tidak boleh melebihi jumlah masuk."); return; }
+    // Kirim tanggal masuk HANYA bila diubah (bila tidak, server pertahankan timestamp
+    // asli → urutan konsumsi FIFO tetap pasti). Pakai tengah hari LOKAL agar tanggal
+    // yang tersimpan sama dengan yang dipilih di zona waktu mana pun.
+    let received = null;
+    if (bDraft.received && bDraft.received !== bDraft.origReceived) {
+      const d = new Date(bDraft.received + "T12:00:00"); // waktu lokal peramban
+      received = isNaN(d) ? null : d.toISOString();
+    }
+    setSavingBatch(true); setBatchErr("");
+    try {
+      const newStock = await Batches.edit(editBatchId, {
+        received, qtyIn, qtyLeft, unitCost: cost,
+        expiryDate: bDraft.expiryDate || null,
+        note: bDraft.note || null,
+      });
+      if (newStock != null && onStockChange) onStockChange(batchFor.id, newStock);
+      setEditBatchId(null); setBDraft(null);
+      setBatchTick((t) => t + 1);
+      setExpTick((t) => t + 1); // segarkan lencana kedaluwarsa di daftar barang
+      onFlash && onFlash("Batch diperbarui");
+    } catch (e) {
+      setBatchErr(e?.message || "Gagal menyimpan batch.");
+    } finally {
+      setSavingBatch(false);
+    }
+  };
+
+  // Hapus satu batch (koreksi) → sisa dikembalikan dari stok produk
+  const removeBatch = async (id) => {
+    if (!batchFor) return;
+    setSavingBatch(true); setBatchErr("");
+    try {
+      const newStock = await Batches.remove(id);
+      if (newStock != null && onStockChange) onStockChange(batchFor.id, newStock);
+      setDelBatchId(null);
+      if (editBatchId === id) { setEditBatchId(null); setBDraft(null); }
+      setBatchTick((t) => t + 1);
+      setExpTick((t) => t + 1);
+      onFlash && onFlash("Batch dihapus");
+    } catch (e) {
+      setBatchErr(e?.message || "Gagal menghapus batch.");
+    } finally {
+      setSavingBatch(false);
     }
   };
 
@@ -2470,6 +2585,7 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
                     <button className="mini in" onClick={() => openMove(p, "in")}><Plus size={14} /> Masuk</button>
                     <button className="mini out" onClick={() => openMove(p, "out")}><Minus size={14} /> Keluar</button>
                     <span className="act-div" />
+                    {hasSupabase && <button className="icon-btn xs" title="Kelola batch" onClick={() => openBatch(p)}><Boxes size={15} /></button>}
                     <button className="icon-btn xs" title="Edit barang" onClick={() => setFormFor(p)}><Pencil size={15} /></button>
                     <button className="icon-btn xs danger-h" title="Hapus barang" onClick={() => setDelFor(p)}><Trash2 size={15} /></button>
                   </div>
@@ -2558,9 +2674,10 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
                         <input
                           type="date"
                           className="batch-exp-input"
-                          value={b.expiryDate || ""}
-                          disabled={savingExp === b.id}
-                          onChange={(e) => setBatchExpiry(b.id, e.target.value)}
+                          value={expDraft[b.id] !== undefined ? expDraft[b.id] : (b.expiryDate || "")}
+                          onChange={(e) => setExpDraft((m) => ({ ...m, [b.id]: e.target.value }))}
+                          onBlur={(e) => commitBatchExpiry(b.id, e.target.value, b.expiryDate || "")}
+                          onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
                         />
                         {b.expiryDate && est && est !== "ok" && (
                           <span className={`exp-badge ${est}`}><AlertTriangle size={10} /> {expiryLabel(b.expiryDate)}</span>
@@ -2574,6 +2691,121 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
                 })}
               </div>
             )}
+          </div>
+        )}
+      </Modal>
+
+      {/* ===== Kelola batch: daftar batch masuk + edit tanggal/jumlah/harga/kedaluwarsa ===== */}
+      <Modal
+        open={!!batchFor}
+        onClose={closeBatch}
+        title="Kelola Batch"
+        width={540}
+        footer={<button className="btn ghost" onClick={closeBatch}>Tutup</button>}
+      >
+        {batchFor && (
+          <div className="form">
+            <div className="form-prod">
+              <span>{batchFor.name}</span>
+              <span className="muted">Stok saat ini: {num(batchFor.stock)} {batchFor.unit}</span>
+            </div>
+            <div className="pay-note">
+              Tiap penerimaan stok = satu <b>batch</b> dengan harga belinya sendiri. Perubahan di sini langsung
+              menyesuaikan stok &amp; nilai inventory (urutan keluar mengikuti FEFO/FIFO). Bagian yang <b>sudah terjual</b> tidak
+              berubah — koreksi hanya berlaku untuk sisa ke depan.
+            </div>
+            {batchErr && <div className="bm-err"><AlertTriangle size={13} /> {batchErr}</div>}
+
+            {allBatches == null && <div className="muted xs">Memuat batch…</div>}
+            {allBatches != null && allBatches.length === 0 && <div className="muted xs">Belum ada batch untuk barang ini.</div>}
+
+            {allBatches != null && allBatches.map((b) => {
+              const est = expiryStatus(b.expiryDate);
+              const depleted = b.qtyLeft <= 0;
+              const editing = editBatchId === b.id;
+              const used = Math.max(0, b.qtyIn - b.qtyLeft);
+              return (
+                <div key={b.id} className={`bm-card${depleted && !editing ? " depleted" : ""}${editing ? " editing" : ""}`}>
+                  {!editing && (
+                    <>
+                      <div className="bm-top">
+                        <div className="bm-when">
+                          <Calendar size={12} />
+                          {new Date(b.at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })}
+                          {depleted && <span className="bm-tag">habis</span>}
+                        </div>
+                        <div className="bm-acts">
+                          <button className="icon-btn xs" title="Edit batch" onClick={() => startEditBatch(b)}><Pencil size={14} /></button>
+                          <button className="icon-btn xs danger-h" title="Hapus batch" onClick={() => { setDelBatchId(b.id); setBatchErr(""); }}><Trash2 size={14} /></button>
+                        </div>
+                      </div>
+                      <div className="bm-stats">
+                        <span className="tab strong">{num(b.qtyLeft)}<span className="muted"> / {num(b.qtyIn)} {batchFor.unit}</span></span>
+                        <span className="tab">@ {rp(b.unitCost)}</span>
+                        {used > 0 && <span className="muted xs">terpakai {num(used)}</span>}
+                      </div>
+                      {b.expiryDate && (
+                        <div className="bm-exp">
+                          {est && est !== "ok"
+                            ? <span className={`exp-badge ${est}`}><AlertTriangle size={10} /> {fmtExpiry(b.expiryDate)} · {expiryLabel(b.expiryDate)}</span>
+                            : <span className="muted xs"><Calendar size={11} /> Kedaluwarsa {fmtExpiry(b.expiryDate)} · {expiryLabel(b.expiryDate)}</span>}
+                        </div>
+                      )}
+                      {b.note && <div className="muted xs bm-note">{b.note}</div>}
+
+                      {delBatchId === b.id && (
+                        <div className="bm-confirm">
+                          <span>Hapus batch ini? {b.qtyLeft > 0 ? `Sisa ${num(b.qtyLeft)} ${batchFor.unit} akan dikurangi dari stok.` : "Batch sudah habis, stok tidak berubah."}</span>
+                          <div className="bm-confirm-btns">
+                            <button className="btn ghost xs" disabled={savingBatch} onClick={() => setDelBatchId(null)}>Batal</button>
+                            <button className="btn danger xs" disabled={savingBatch} onClick={() => removeBatch(b.id)}>{savingBatch ? "Menghapus…" : "Hapus"}</button>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {editing && bDraft && (
+                    <div className="bm-edit">
+                      <div className="bm-grid">
+                        <label className="fld">
+                          <span>Tanggal masuk</span>
+                          <input type="date" className="batch-exp-input" value={bDraft.received} onChange={(e) => setBDraft((d) => ({ ...d, received: e.target.value }))} />
+                        </label>
+                        <label className="fld">
+                          <span>Kedaluwarsa <span className="muted">(opsional)</span></span>
+                          <input type="date" className="batch-exp-input" value={bDraft.expiryDate} onChange={(e) => setBDraft((d) => ({ ...d, expiryDate: e.target.value }))} />
+                        </label>
+                        <label className="fld">
+                          <span>Jumlah masuk ({batchFor.unit})</span>
+                          <input type="number" min="0" step="any" value={bDraft.qtyIn} onChange={(e) => setBDraft((d) => ({ ...d, qtyIn: e.target.value }))} />
+                        </label>
+                        <label className="fld">
+                          <span>Sisa sekarang ({batchFor.unit})</span>
+                          <input type="number" min="0" step="any" value={bDraft.qtyLeft} onChange={(e) => setBDraft((d) => ({ ...d, qtyLeft: e.target.value }))} />
+                        </label>
+                        <label className="fld bm-wide">
+                          <span>Harga modal / {batchFor.unit || "satuan"} (Rp)</span>
+                          <input type="number" min="0" step="any" value={bDraft.unitCost} onChange={(e) => setBDraft((d) => ({ ...d, unitCost: e.target.value }))} />
+                        </label>
+                        <label className="fld bm-wide">
+                          <span>Catatan</span>
+                          <input value={bDraft.note} onChange={(e) => setBDraft((d) => ({ ...d, note: e.target.value }))} placeholder="Keterangan batch…" />
+                        </label>
+                      </div>
+                      <div className="bm-hint muted xs">
+                        Ubah <b>Sisa sekarang</b> untuk mengoreksi jumlah fisik batch — selisihnya otomatis masuk ke stok barang &amp; tercatat di riwayat.
+                        {bDraft.expiryDate ? "" : " Tanggal kedaluwarsa kosong = batch tanpa peringatan."}
+                      </div>
+                      <div className="bm-edit-btns">
+                        <button className="btn ghost xs" disabled={savingBatch} onClick={() => { setEditBatchId(null); setBDraft(null); setBatchErr(""); }}>Batal</button>
+                        <button className="btn xs" disabled={savingBatch} onClick={saveBatch}>{savingBatch ? "Menyimpan…" : "Simpan"}</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </Modal>
@@ -4953,6 +5185,28 @@ function Style() {
       .exp-badge.expired{background:var(--crit-bg);color:var(--crit)}
       .exp-badge.soon{background:var(--warn-bg);color:var(--warn)}
       .exp-badge.ok{background:var(--ok-bg);color:var(--ok)}
+      /* kelola batch (edit/hapus per batch) */
+      .bm-err{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--crit);background:var(--crit-bg);border-radius:8px;padding:7px 10px}
+      .bm-card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;background:var(--surface)}
+      .bm-card.depleted{opacity:.6}
+      .bm-card.editing{border-color:var(--accent);background:var(--surface-2)}
+      .bm-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+      .bm-when{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--ink-soft)}
+      .bm-tag{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-faint);border:1px solid var(--line);border-radius:5px;padding:1px 5px;margin-left:2px}
+      .bm-acts{display:inline-flex;gap:4px}
+      .bm-stats{display:flex;align-items:center;gap:12px;font-size:13px;flex-wrap:wrap}
+      .bm-exp .exp-badge{margin-top:0}
+      .bm-exp .muted{display:inline-flex;align-items:center;gap:4px}
+      .bm-note{background:var(--surface-2);border-radius:7px;padding:5px 8px}
+      .bm-confirm{border-top:1px solid var(--hair);padding-top:8px;display:flex;flex-direction:column;gap:7px;font-size:12px;color:var(--ink-soft)}
+      .bm-confirm-btns,.bm-edit-btns{display:flex;gap:8px;justify-content:flex-end}
+      .bm-edit{display:flex;flex-direction:column;gap:9px}
+      .bm-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px 12px}
+      .bm-grid .fld{gap:4px}
+      .bm-grid .fld span{font-size:11.5px}
+      .bm-grid input{width:100%}
+      .bm-wide{grid-column:1 / -1}
+      .bm-hint{line-height:1.45}
       .acc-all{border:1px solid var(--line);background:transparent;color:var(--ink-soft);font:inherit;font-size:12.5px;font-weight:600;padding:5px 11px;border-radius:8px;cursor:pointer;transition:all .15s var(--ease)}
       .acc-all:hover{border-color:var(--ink-faint);color:var(--ink)}
       .acc-all.on{background:var(--accent-soft);border-color:transparent;color:var(--accent)}

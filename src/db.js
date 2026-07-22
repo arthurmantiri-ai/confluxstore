@@ -149,6 +149,46 @@ export const Batches = {
       qtyLeft: Number(r.qty_left), expiryDate: r.expiry_date || null,
     }));
   },
+  // SEMUA batch sebuah produk (termasuk yang sisanya sudah 0) untuk layar
+  // "Kelola batch". Urut dari yang paling lama (searah urutan konsumsi FIFO).
+  async listAll(productId) {
+    const { data, error } = await supabase
+      .from("stock_batches").select("*")
+      .eq("product_id", productId)
+      .order("created_at");
+    if (error) throw error;
+    return data.map((r) => ({
+      id: r.id, qtyIn: Number(r.qty_in), qtyLeft: Number(r.qty_left),
+      unitCost: Number(r.unit_cost), note: r.note, at: r.created_at,
+      expiryDate: r.expiry_date || null,
+    }));
+  },
+  // Koreksi SATU batch: tanggal masuk, jumlah masuk, sisa, harga modal, tanggal
+  // kedaluwarsa, catatan. Server merekonsiliasi products.stock sebesar perubahan
+  // sisa (invariant stok = Σ sisa) + mencatat jejak di movements — DALAM SATU
+  // transaksi (RPC edit_batch). Mengembalikan angka stok produk terbaru.
+  //   patch = { received?(ISO|null → null = jangan ubah tanggal masuk),
+  //             qtyIn, qtyLeft, unitCost, expiryDate(YYYY-MM-DD|null), note|null }
+  async edit(batchId, patch) {
+    const { data, error } = await supabase.rpc("edit_batch", {
+      p_batch: batchId,
+      p_qty_in: patch.qtyIn,
+      p_qty_left: patch.qtyLeft,
+      p_cost: patch.unitCost,
+      p_received: patch.received ?? null,
+      p_expiry: patch.expiryDate ?? null,
+      p_note: patch.note ?? null,
+    });
+    if (error) throw error;
+    return data == null ? null : Number(data);
+  },
+  // Hapus SATU batch (koreksi entri keliru). Sisa batch dikembalikan dari stok
+  // produk + jejak movements, atomik di server (RPC delete_batch).
+  async remove(batchId) {
+    const { data, error } = await supabase.rpc("delete_batch", { p_batch: batchId });
+    if (error) throw error;
+    return data == null ? null : Number(data);
+  },
 };
 
 /* ============================ MOVEMENTS ============================ */
