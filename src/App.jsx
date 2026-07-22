@@ -1669,7 +1669,7 @@ export default function App() {
   const createOrder = async (data) => {
     const total = data.items.reduce((a, it) => a + (pById(it.pid)?.price || 0) * it.qty, 0);
     const id = nextOrderId(orders);
-    const order = { id, customer: data.customer, phone: data.phone, channel: data.channel, status: "baru", items: data.items, total, at: "Baru saja" };
+    const order = { id, customer: data.customer, phone: data.phone, channel: data.channel, payMethod: data.payMethod || "transfer", status: "baru", items: data.items, total, at: "Baru saja" };
     setOrders((os) => [order, ...os]);
     if (hasSupabase) { try { await OrdersApi.create(order); } catch (e) { console.error("[sync]", e); flash("Order tersimpan lokal — gagal ke server"); } }
     flash(`Order ${id} dibuat`);
@@ -2039,13 +2039,38 @@ export default function App() {
               onStatus={(id, status) => persist(() => OrdersApi.setStatus(id, status))}
               onCreate={createOrder}
               onAccept={(o) => {
+                // Data katalog belum termuat → jangan proses (mencegah baris ID produk basi).
+                if (hasSupabase && !dataReadyRef.current) {
+                  flash("Data toko belum termuat dari server — buka ulang aplikasi sebelum memproses order.");
+                  return false;
+                }
+                // Validasi: semua barang order harus ada di katalog. Bila ada yang hilang
+                // (mis. produk dihapus setelah order dibuat), STOP dengan pesan jelas — jangan
+                // kirim baris "hantu" yang akan ditolak server DIAM-DIAM lalu di-rollback
+                // (itulah sebabnya dulu stok & keuangan gagal masuk).
+                const missing = o.items.filter((it) => !pById(it.pid));
+                if (missing.length) {
+                  flash(`Tidak bisa terima ${o.id}: ada ${missing.length} barang yang sudah tidak ada di katalog. Perbarui order dulu.`);
+                  return false;
+                }
+                const method = o.payMethod || "transfer";
                 const txnId = uid();
+                // Cara bayar = hutang → buat bon (atomik bersama penjualan), persis seperti kasir.
+                let debt = null;
+                if (method === "hutang") {
+                  const debtItems = o.items.map((it) => { const p = pById(it.pid); return { name: p?.name || "Barang", qtyLabel: `${num(it.qty)} ${p?.unit || ""}`.trim(), lineTotal: (p?.price || 0) * it.qty }; });
+                  const dtotal = o.items.reduce((a, it) => a + (pById(it.pid)?.price || 0) * it.qty, 0);
+                  const meta = { debtor: o.customer || "Pelanggan", business: "", phone: o.phone || "", items: debtItems };
+                  debt = hasSupabase ? buildDebt(meta, dtotal) : addDebt(meta, dtotal);
+                }
                 sellItems(
                   o.items.map((it) => { const p = pById(it.pid); return { pid: it.pid, qty: it.qty, revenue: (p?.price || 0) * it.qty }; }),
                   `Order ${o.id}`,
-                  { txnId, cashier: "Order Online", method: "order", receiptNo: o.id, shiftId: shift?.id || null }
+                  { txnId, cashier: "Order Online", method, receiptNo: o.id, shiftId: shift?.id || null, debt }
                 );
-                flash(`${o.id} diterima & stok dipotong`);
+                flash(method === "hutang"
+                  ? `${o.id} diterima — stok dipotong, dicatat sebagai hutang`
+                  : `${o.id} diterima — stok dipotong (${PAY_LABEL[method] || method})`);
               }}
               flash={flash}
             />
@@ -3735,6 +3760,85 @@ const ORDER_FLOW = ["baru", "diproses", "dikirim", "selesai"];
 const ORDER_LABEL = { baru: "Baru", diproses: "Diproses", dikirim: "Dikirim", selesai: "Selesai" };
 const CHANNEL_ICON = { WhatsApp: Globe, Instagram: Globe, Marketplace: Truck };
 
+// Cara bayar untuk order online. Ini adalah metode SUNGGUHAN (bukan "order") yang
+// dipakai saat order diterima → penjualan tercatat rapi di akuntansi (tunai/non-tunai)
+// dan lolos sinkron. "Hutang" membuat bon di menu Hutang, persis seperti kasir.
+const ORDER_PAY_OPTIONS = [
+  { key: "transfer", label: "Transfer" },
+  { key: "qris", label: "QRIS" },
+  { key: "cash", label: "Tunai (COD)" },
+  { key: "hutang", label: "Hutang (bayar nanti)" },
+];
+const PAY_SHORT = { transfer: "Transfer", qris: "QRIS", cash: "COD", hutang: "Hutang" };
+
+/* ---------- Urai pesan WhatsApp menjadi baris order ---------- */
+// WA Business gratis TIDAK punya API untuk membaca pesan masuk otomatis, jadi alur
+// yang realistis: operator MENEMPEL isi chat pesanan pelanggan, lalu fungsi ini
+// mengubahnya menjadi daftar barang (dicocokkan ke katalog) + jumlah. Hasilnya SELALU
+// ditinjau operator sebelum disimpan — jadi tebakan yang meleset gampang dibetulkan.
+const COUNT_UNIT = "pcs|pc|botol|dus|box|karton|ktn|pack|pak|bungkus|sachet|renceng|buah|unit|biji|lusin|kaleng|kotak|sak|saset";
+const WA_STOPWORDS = /\b(halo|hai|hi|selamat|pagi|siang|sore|malam|mau|order|pesan|pesen|pesanan|tolong|minta|kak|kakak|bang|mas|mbak|pak|bu|ibu|bapak|ya|yaa|yah|dong|nya|beli|terima|kasih|makasih|thx|kirim|dikirim|antar|diantar|alamat|nama|no|nomor|hp|wa|whatsapp|ready|stok|stock|ada|berapa|harga|total|rp|idr)\b/gi;
+const normStr = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const extractPhone = (t) => { const m = String(t || "").match(/(?:\+?62|0)8[0-9][0-9\-\s]{6,13}/); return m ? m[0].replace(/[\s\-]/g, "") : ""; };
+const hasNameToken = (frag) => normStr(frag).split(" ").some((t) => /[a-z]/i.test(t) && t.length >= 2);
+// Buang bullet, penanda jumlah, & embel harga — SISAKAN token ukuran (760ml, 1kg, 70%)
+// karena justru membantu mencocokkan ke produk yang tepat.
+const matchFrag = (line) => line
+  .replace(/^[\s\-*•·>().]+/, " ")
+  .replace(/(\d+)\s*[x×]/gi, " ").replace(/[x×]\s*(\d+)/gi, " ")
+  .replace(new RegExp("\\b\\d+\\s*(?:" + COUNT_UNIT + ")\\b", "gi"), " ")
+  .replace(/\b\d+\s+kg\b/gi, " ")
+  .replace(/\b(harga|total|rp|idr)\b[\s:]*[\d.,]+/gi, " ")
+  .trim();
+// Ambil JUMLAH tanpa tertipu angka pada nama produk (760ml, 800g, 70%, 1kg tanpa spasi)
+const extractQty = (line) => {
+  const s = " " + String(line).toLowerCase() + " ";
+  let m = s.match(/(\d+)\s*[x×]/) || s.match(/[x×]\s*(\d+)/);
+  if (m) return Math.max(1, parseInt(m[1], 10) || 1);
+  m = s.match(new RegExp("(\\d+)\\s*(?:" + COUNT_UNIT + ")\\b"));
+  if (m) return Math.max(1, parseInt(m[1], 10) || 1);
+  m = s.match(/(\d+)\s+kg\b/); // "2 kg" (biji) = jumlah; "1kg" (nempel) = ukuran → diabaikan
+  if (m) return Math.max(1, parseInt(m[1], 10) || 1);
+  m = String(line).match(/^\s*[-*•·>().]*\s*(\d+)\s+(?=[a-z])/i); // "2 Kopi Toraja"
+  if (m) return Math.max(1, parseInt(m[1], 10) || 1);
+  return 1;
+};
+// Produk paling cocok untuk satu penggalan (skor = porsi kata penggalan yang muncul di nama produk)
+const bestProductMatch = (frag, products) => {
+  const q = normStr(frag).split(" ").filter((t) => t.length >= 2);
+  if (!q.length) return null;
+  let best = null, bestScore = 0;
+  for (const p of products) {
+    const hay = normStr(`${p.name} ${p.sku || ""} ${p.category || ""}`);
+    let hit = 0;
+    for (const t of q) if (hay.includes(t)) hit++;
+    const score = hit / q.length;
+    if (score > bestScore) { bestScore = score; best = p; }
+  }
+  return bestScore >= 0.5 ? best : null;
+};
+function parseWaOrder(text, products) {
+  const src = String(text || "");
+  const phone = extractPhone(src);
+  let customer = "";
+  const nm = src.match(/(?:nama|a\/?n|atas nama)\s*:?\s*([a-z][a-z0-9 .'&-]{1,40})/i);
+  if (nm) customer = nm[1].replace(/\s+/g, " ").trim();
+  const lines = [];
+  const unmatched = [];
+  for (const raw of src.split(/[\n\r]+/).map((l) => l.trim()).filter(Boolean)) {
+    const noPhone = raw.replace(/(?:\+?62|0)8[0-9\-\s]{7,14}/g, " ");
+    if (!/[a-z]{3,}/i.test(noPhone)) continue; // baris nomor/angka saja
+    const frag = matchFrag(raw).replace(WA_STOPWORDS, " ").replace(/\s+/g, " ").trim();
+    if (!hasNameToken(frag)) continue; // salam / basa-basi tanpa nama barang
+    const p = bestProductMatch(frag, products);
+    if (!p) { unmatched.push(raw.trim()); continue; }
+    const qty = extractQty(raw);
+    const ex = lines.find((x) => x.pid === p.id);
+    if (ex) ex.qty += qty; else lines.push({ pid: p.id, qty });
+  }
+  return { phone, customer, lines, unmatched };
+}
+
 function Orders({ orders, setOrders, pById, products, onAccept, onStatus, onCreate, flash }) {
   const [tab, setTab] = useState("baru");
   const [creating, setCreating] = useState(false);
@@ -3758,7 +3862,13 @@ function Orders({ orders, setOrders, pById, products, onAccept, onStatus, onCrea
     setTimeout(() => { busyRef.current = false; }, 800);
     const i = ORDER_FLOW.indexOf(o.status);
     const next = ORDER_FLOW[Math.min(i + 1, ORDER_FLOW.length - 1)];
-    if (o.status === "baru") onAccept(o);
+    // Terima order (baru → diproses) = potong stok + catat penjualan. Bila onAccept
+    // menolak (barang hilang / data belum siap), JANGAN majukan status — biarkan order
+    // tetap "baru" agar bisa diperbaiki dulu.
+    if (o.status === "baru") {
+      const ok = onAccept(o);
+      if (ok === false) { busyRef.current = false; return; }
+    }
     setOrders((os) => os.map((x) => (x.id === o.id ? { ...x, status: next } : x)));
     onStatus && onStatus(o.id, next);
     if (o.status !== "baru") flash(`${o.id} → ${ORDER_LABEL[next]}`);
@@ -3793,7 +3903,7 @@ function Orders({ orders, setOrders, pById, products, onAccept, onStatus, onCrea
               <div className="order-card-head">
                 <div>
                   <div className="order-id">{o.id}</div>
-                  <div className="muted xs">{o.customer} · {fmtAt(o.at)}</div>
+                  <div className="muted xs">{o.customer} · {fmtAt(o.at)} · bayar: {PAY_SHORT[o.payMethod || "transfer"] || "Transfer"}</div>
                 </div>
                 <span className="channel"><ChIcon size={13} /> {o.channel}</span>
               </div>
@@ -3837,9 +3947,12 @@ function OrderForm({ products, onClose, onSave }) {
   const [customer, setCustomer] = useState("");
   const [phone, setPhone] = useState("");
   const [channel, setChannel] = useState("WhatsApp");
+  const [payMethod, setPayMethod] = useState("transfer");
   const [lines, setLines] = useState([]);
   const [pick, setPick] = useState(products[0]?.id || "");
   const [qty, setQty] = useState(1);
+  const [waText, setWaText] = useState("");
+  const [waInfo, setWaInfo] = useState(null); // { added, unmatched: [] } — ringkasan hasil urai
 
   const addLine = () => {
     if (!pick || qty < 1) return;
@@ -3850,7 +3963,26 @@ function OrderForm({ products, onClose, onSave }) {
     });
     setQty(1);
   };
+  const setLineQty = (pid, q) => setLines((ls) => ls.map((l) => (l.pid === pid ? { ...l, qty: Math.max(1, Math.round(q) || 1) } : l)));
   const removeLine = (pid) => setLines((ls) => ls.filter((l) => l.pid !== pid));
+
+  // Urai pesan WhatsApp yang ditempel → gabungkan ke daftar barang (jumlah dijumlah bila
+  // barang yang sama sudah ada). Nama & nomor terisi otomatis bila masih kosong.
+  const parseWa = () => {
+    const r = parseWaOrder(waText, products);
+    setLines((ls) => {
+      const next = ls.map((l) => ({ ...l }));
+      for (const nl of r.lines) {
+        const ex = next.find((x) => x.pid === nl.pid);
+        if (ex) ex.qty += nl.qty; else next.push({ ...nl });
+      }
+      return next;
+    });
+    if (r.customer && !customer.trim()) setCustomer(r.customer);
+    if (r.phone && !phone.trim()) setPhone(r.phone);
+    setWaInfo({ added: r.lines.length, unmatched: r.unmatched });
+  };
+
   const total = lines.reduce((a, l) => a + (products.find((p) => p.id === l.pid)?.price || 0) * l.qty, 0);
   const valid = customer.trim() && lines.length > 0;
 
@@ -3859,20 +3991,46 @@ function OrderForm({ products, onClose, onSave }) {
       open onClose={onClose} width={540} title="Order Baru"
       footer={<>
         <button className="btn ghost" onClick={onClose}>Batal</button>
-        <button className="btn" disabled={!valid} onClick={() => onSave({ customer: customer.trim(), phone: phone.trim(), channel, items: lines })}><Check size={15} /> Simpan order</button>
+        <button className="btn" disabled={!valid} onClick={() => onSave({ customer: customer.trim(), phone: phone.trim(), channel, payMethod, items: lines })}><Check size={15} /> Simpan order</button>
       </>}
     >
       <div className="form">
+        <div className="wa-paste">
+          <label className="fld"><span><Phone size={13} style={{ verticalAlign: "-2px", marginRight: 4 }} />Tempel pesan WhatsApp (opsional)</span>
+            <textarea className="wa-textarea" value={waText} onChange={(e) => setWaText(e.target.value)}
+              placeholder={"Salin-tempel chat pesanan pelanggan, lalu klik “Urai jadi barang”.\ncth:\n- Kopi Toraja 2 kg\n- Dripp Caramel 1 dus\n- gula aren 3 pcs"} />
+          </label>
+          <button className="btn sm" type="button" onClick={parseWa} disabled={!waText.trim()}><ClipboardList size={14} /> Urai jadi barang</button>
+          {waInfo && (
+            <div className="wa-info">
+              {waInfo.added > 0
+                ? <span className="ok-text">{waInfo.added} barang dikenali & ditambahkan — cek jumlahnya di bawah.</span>
+                : <span className="warn-text">Tidak ada barang yang cocok dari pesan itu.</span>}
+              {waInfo.unmatched.length > 0 && (
+                <div className="wa-unmatched">Tidak dikenali (tambah manual): {waInfo.unmatched.map((u, i) => (
+                  <em key={i}>“{u}”{i < waInfo.unmatched.length - 1 ? ", " : ""}</em>
+                ))}</div>
+              )}
+            </div>
+          )}
+        </div>
+
         <div className="grid2">
           <label className="fld"><span>Nama pelanggan</span>
-            <input value={customer} onChange={(e) => setCustomer(e.target.value)} autoFocus placeholder="cth. Kedai Senja" /></label>
+            <input value={customer} onChange={(e) => setCustomer(e.target.value)} placeholder="cth. Kedai Senja" /></label>
           <label className="fld"><span>No. WhatsApp</span>
             <input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="numeric" placeholder="cth. 0812xxxxxxx" /></label>
         </div>
-        <label className="fld"><span>Sumber order</span>
-          <select className="sim-select" value={channel} onChange={(e) => setChannel(e.target.value)}>
-            <option>WhatsApp</option><option>Instagram</option><option>Marketplace</option><option>Telepon</option>
-          </select></label>
+        <div className="grid2">
+          <label className="fld"><span>Sumber order</span>
+            <select className="sim-select" value={channel} onChange={(e) => setChannel(e.target.value)}>
+              <option>WhatsApp</option><option>Instagram</option><option>Marketplace</option><option>Telepon</option>
+            </select></label>
+          <label className="fld"><span>Cara bayar</span>
+            <select className="sim-select" value={payMethod} onChange={(e) => setPayMethod(e.target.value)}>
+              {ORDER_PAY_OPTIONS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
+            </select></label>
+        </div>
 
         <div className="form-section">Barang dipesan</div>
         <div className="order-pick">
@@ -3888,15 +4046,20 @@ function OrderForm({ products, onClose, onSave }) {
               const p = products.find((x) => x.id === l.pid);
               return (
                 <div key={l.pid} className="order-line">
-                  <span>{l.qty}× {p?.name}</span>
+                  <span className="ol-name">{p?.name || "— barang tak dikenal —"}</span>
+                  <div className="ol-qty">
+                    <button className="icon-btn xs" type="button" onClick={() => setLineQty(l.pid, l.qty - 1)} aria-label="kurangi"><Minus size={12} /></button>
+                    <input type="number" min="1" className="qty-in" value={l.qty} onChange={(e) => setLineQty(l.pid, Number(e.target.value))} />
+                    <button className="icon-btn xs" type="button" onClick={() => setLineQty(l.pid, l.qty + 1)} aria-label="tambah"><Plus size={12} /></button>
+                  </div>
                   <span className="muted tab">{rp((p?.price || 0) * l.qty)}</span>
-                  <button className="icon-btn xs danger-h" type="button" onClick={() => removeLine(l.pid)}><X size={14} /></button>
+                  <button className="icon-btn xs danger-h" type="button" onClick={() => removeLine(l.pid)} aria-label="hapus"><X size={14} /></button>
                 </div>
               );
             })}
             <div className="order-line grand"><span>Total</span><b>{rp(total)}</b></div>
           </div>
-        ) : <div className="muted xs">Belum ada barang. Pilih barang lalu klik "Tambah".</div>}
+        ) : <div className="muted xs">Belum ada barang. Tempel pesan WA di atas, atau pilih barang lalu klik “Tambah”.</div>}
       </div>
     </Modal>
   );
@@ -6322,6 +6485,18 @@ function Style() {
       .order-line.grand{border-bottom:none;border-top:2px solid var(--line);margin-top:2px;padding-top:9px;font-weight:700}
       .order-line.grand b{font-family:'Space Grotesk'}
       .done-tag{display:inline-flex;align-items:center;gap:4px;color:var(--ok);font-weight:600;font-size:13px}
+      /* ---- editor jumlah inline pada baris order ---- */
+      .ol-qty{display:flex;align-items:center;gap:4px;flex:none}
+      .ol-qty .qty-in{width:52px;text-align:center;border:1px solid var(--line);background:var(--surface-2);border-radius:var(--r-xs);padding:6px 4px;color:var(--ink);font:inherit;font-size:13px}
+      .ol-qty .qty-in::-webkit-outer-spin-button,.ol-qty .qty-in::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+      /* ---- kotak tempel pesan WhatsApp ---- */
+      .wa-paste{background:var(--surface-2);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:12px;margin-bottom:12px;display:flex;flex-direction:column;gap:8px}
+      .wa-textarea{width:100%;box-sizing:border-box;border:1px solid var(--line);background:var(--surface);border-radius:var(--r-xs);padding:9px 10px;color:var(--ink);font:inherit;font-size:13px;line-height:1.5;resize:vertical;min-height:78px}
+      .wa-textarea::placeholder{color:var(--ink-faint)}
+      .wa-paste .btn.sm{align-self:flex-start}
+      .wa-info{font-size:12px;display:flex;flex-direction:column;gap:3px}
+      .ok-text{color:var(--ok);font-weight:600}
+      .wa-unmatched{color:var(--ink-soft)} .wa-unmatched em{font-style:italic;color:var(--warn)}
 
       /* ===== Riwayat Penjualan ===== */
       .chart-empty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:0 24px;
