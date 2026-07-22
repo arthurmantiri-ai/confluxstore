@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { hasSupabase } from "./supabaseClient";
-import { Products, Batches, Movements, Orders as OrdersApi, Debts as DebtsApi, Capital, Expenses, CashDeposits, Sales, Consign, Settings as SettingsApi, Auth, Profiles, Shifts } from "./db";
+import { Products, Batches, Movements, Orders as OrdersApi, Debts as DebtsApi, Capital, Expenses, CashDeposits, Sales, Consign, Returns as ReturnsApi, Settings as SettingsApi, Auth, Profiles, Shifts } from "./db";
 import {
   LayoutDashboard, Package, ShoppingCart, Globe, RefreshCcw,
   Plus, Minus, Search, X, Check, TrendingUp, ArrowUpRight, ArrowDownRight,
@@ -10,7 +10,8 @@ import {
   Lock, Unlock, ShieldCheck, Calculator, ArrowRight,
   Phone, Building2, User, CheckCircle2, Printer, Settings, LogOut,
   LineChart, BarChart3, Coins, Hammer, Download, Calendar,
-  Bean, Droplets, CupSoda, Coffee, LayoutGrid, History, Bluetooth, Handshake
+  Bean, Droplets, CupSoda, Coffee, LayoutGrid, History, Bluetooth, Handshake,
+  Undo2, ArrowLeftRight, PackageX
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -41,6 +42,12 @@ const invoiceNo = () => {
   const d = new Date();
   const p = (n) => String(n).padStart(2, "0");
   return `INV-${String(d.getFullYear()).slice(2)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+};
+// Nomor nota retur (format konsisten dengan INV, prefix RTR)
+const returnNoGen = () => {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `RTR-${String(d.getFullYear()).slice(2)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 };
 
 // Periode bulan (YYYY-MM) -> label ramah; bulan sekarang & bulan sebelumnya
@@ -345,6 +352,7 @@ const NAV = [
   { key: "simulasi", label: "Simulasi Stok", icon: Calculator, roles: ["manager"] },
   { key: "akuntansi", label: "Akuntansi", icon: LineChart, roles: ["manager"] },
   { key: "riwayat", label: "Riwayat Penjualan", icon: History, roles: ["cashier", "manager"] },
+  { key: "retur", label: "Retur & Tukar", icon: Undo2, roles: ["cashier", "manager"] },
   { key: "shiftlog", label: "Shift Kasir", icon: Wallet, roles: ["manager"] },
 ];
 
@@ -361,6 +369,26 @@ const PAY_LABEL = Object.fromEntries(PAY_METHODS.map((m) => [m.key, m.label]));
 const SPLIT_METHODS = PAY_METHODS.filter((m) => ["cash", "transfer", "qris", "card"].includes(m.key));
 // "Tunai Rp100.000 + QRIS Rp60.000" — untuk pesan sukses & rincian
 const payListLabel = (payments) => (payments || []).map((p) => `${PAY_LABEL[p.method] || p.method} ${rp(p.amount)}`).join(" + ");
+
+// ===== Retur & tukar =====
+// Alasan retur (kepala nota). Metode "kembali uang" pakai PAY_METHODS non-hutang.
+const RETURN_REASONS = [
+  { key: "rusak", label: "Barang rusak" },
+  { key: "expired", label: "Kedaluwarsa" },
+  { key: "salah_beli", label: "Salah beli" },
+  { key: "tidak_cocok", label: "Tidak cocok / berubah pikiran" },
+  { key: "lainnya", label: "Lainnya" },
+];
+const RETURN_REASON_LABEL = Object.fromEntries(RETURN_REASONS.map((r) => [r.key, r.label]));
+// Kondisi barang yang diretur -> menentukan bisa dijual lagi (restock) atau tidak.
+const RETURN_CONDITIONS = [
+  { key: "baik", label: "Masih baik", restock: true, hint: "kembali ke stok jual" },
+  { key: "rusak", label: "Rusak", restock: false, hint: "tidak bisa dijual (kerugian)" },
+  { key: "expired", label: "Kedaluwarsa", restock: false, hint: "tidak bisa dijual (kerugian)" },
+];
+const RETURN_CONDITION_LABEL = Object.fromEntries(RETURN_CONDITIONS.map((c) => [c.key, c.label]));
+// Metode pengembalian/penerimaan uang untuk retur (tanpa hutang & campur)
+const REFUND_METHODS = PAY_METHODS.filter((m) => ["cash", "transfer", "qris", "card"].includes(m.key));
 
 const catIcon = (category = "") => {
   const c = String(category).toLowerCase();
@@ -402,6 +430,32 @@ const escposReceipt = (store, d) => {
   if (store.phone) s += store.phone + "\n";
   s += "-".repeat(W) + "\n";
   s += ESC + "a" + "\x00"; // left
+  if (d.kind === "retur") {
+    const hasEx = d.exItems && d.exItems.length > 0;
+    s += (hasEx ? "NOTA RETUR & TUKAR" : "NOTA RETUR") + "\n";
+    if (d.reprint) s += "-- CETAK ULANG --\n";
+    s += "No : " + d.no + "\n";
+    s += "Tgl: " + d.date + "\n";
+    s += "Kasir: " + d.cashier + "\n";
+    s += "Alasan: " + d.reasonLabel + "\n";
+    s += "-".repeat(W) + "\n" + "BARANG DIRETUR\n";
+    d.items.forEach((it) => { s += it.name + "\n"; s += line("  " + it.qtyLabel, "-" + rp(it.lineTotal)); });
+    if (hasEx) {
+      s += "-".repeat(W) + "\n" + "BARANG PENGGANTI\n";
+      d.exItems.forEach((it) => { s += it.name + "\n"; s += line("  " + it.qtyLabel, rp(it.lineTotal)); });
+    }
+    s += "-".repeat(W) + "\n";
+    s += line("Nilai diretur", "-" + rp(d.refundTotal));
+    if (d.exchangeTotal > 0) s += line("Nilai pengganti", rp(d.exchangeTotal));
+    s += line(d.net >= 0 ? "PELANGGAN BAYAR" : "UANG KEMBALI", rp(Math.abs(d.net)));
+    if (d.net !== 0) s += line("Metode", d.settlementLabel);
+    s += "-".repeat(W) + "\n";
+    s += ESC + "a" + "\x01"; // center
+    s += store.footer + "\n" + store.phone + "\n";
+    s += "\n\n\n";
+    s += GS + "V" + "\x42" + "\x00"; // partial cut
+    return s;
+  }
   s += (d.kind === "hutang" ? "NOTA HUTANG" : "NOTA PEMBAYARAN") + "\n";
   if (d.reprint) s += "-- CETAK ULANG --\n";
   s += "No : " + d.no + "\n";
@@ -630,6 +684,56 @@ function SyncBanner({ online, syncing, pending, dead, onRetry, onCopyDead }) {
 function Receipt({ store, data }) {
   if (!data) return null;
   const d = data;
+  if (d.kind === "retur") {
+    const hasEx = d.exItems && d.exItems.length > 0;
+    return (
+      <div className={`receipt ${store.paper === 80 ? "w80" : ""}`}>
+        <img className="r-logo" src={LOGO} alt="" />
+        <div className="r-center r-store">{store.name}</div>
+        <div className="r-center r-small">{store.addr1}</div>
+        {store.addr2 && <div className="r-center r-tag">{store.addr2}</div>}
+        {store.phone && <div className="r-center r-small">{store.phone}</div>}
+        <div className="r-dash" />
+        <div className="r-center r-title">{hasEx ? "NOTA RETUR & TUKAR" : "NOTA RETUR"}</div>
+        {d.reprint && <div className="r-center r-small">— CETAK ULANG —</div>}
+        <div className="r-meta">
+          <div className="r-row r-small"><span>No</span><span>{d.no}</span></div>
+          <div className="r-row r-small"><span>Tanggal</span><span>{d.date}</span></div>
+          <div className="r-row r-small"><span>Kasir</span><span>{d.cashier}</span></div>
+          <div className="r-row r-small"><span>Alasan</span><span>{d.reasonLabel}</span></div>
+        </div>
+        <div className="r-dash" />
+        <div className="r-center r-small">BARANG DIRETUR</div>
+        {d.items.map((it, i) => (
+          <div key={i} className="r-item">
+            <div className="r-item-name">{it.name}</div>
+            <div className="r-row"><span className="r-small">{it.qtyLabel}</span><span>-{rp(it.lineTotal)}</span></div>
+          </div>
+        ))}
+        {hasEx && (
+          <>
+            <div className="r-dash" />
+            <div className="r-center r-small">BARANG PENGGANTI</div>
+            {d.exItems.map((it, i) => (
+              <div key={i} className="r-item">
+                <div className="r-item-name">{it.name}</div>
+                <div className="r-row"><span className="r-small">{it.qtyLabel}</span><span>{rp(it.lineTotal)}</span></div>
+              </div>
+            ))}
+          </>
+        )}
+        <div className="r-dash" />
+        <div className="r-row r-small"><span>Nilai diretur</span><span>-{rp(d.refundTotal)}</span></div>
+        {d.exchangeTotal > 0 && <div className="r-row r-small"><span>Nilai pengganti</span><span>{rp(d.exchangeTotal)}</span></div>}
+        <div className="r-row r-total"><span>{d.net >= 0 ? "PELANGGAN BAYAR" : "UANG KEMBALI"}</span><span>{rp(Math.abs(d.net))}</span></div>
+        {d.net !== 0 && <div className="r-row r-small"><span>Metode</span><span>{d.settlementLabel}</span></div>}
+        <div className="r-dash" />
+        <div className="r-center r-foot">{store.footer}</div>
+        <div className="r-center r-brand">CONFLUX COFFEE CLUB</div>
+        <div className="r-center r-small">{store.phone}</div>
+      </div>
+    );
+  }
   return (
     <div className={`receipt ${store.paper === 80 ? "w80" : ""}`}>
       <img className="r-logo" src={LOGO} alt="" />
@@ -905,6 +1009,7 @@ export default function App() {
   const [salesLog, setSalesLog] = useState(SEED_SALES_LOG);
   const [consigns, setConsigns] = useState([]); // buku kewajiban setor titip jual
   const [consignPayments, setConsignPayments] = useState([]); // riwayat setoran (pembayaran bertahap ke distributor)
+  const [returns, setReturns] = useState([]); // buku retur & tukar (kepala + baris barang)
   const [toast, setToast] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [role, setRole] = useState(null); // null = belum login, "cashier" | "manager"
@@ -944,9 +1049,9 @@ export default function App() {
     const res = await Promise.allSettled([
       Products.list(), Movements.list(), OrdersApi.list(), DebtsApi.list(),
       Capital.list(), Expenses.list(), Sales.list({ sinceDays: 90 }), SettingsApi.get(),
-      Consign.list(), Consign.payments(), CashDeposits.list(),
+      Consign.list(), Consign.payments(), CashDeposits.list(), ReturnsApi.list({ limit: 300 }),
     ]);
-    const [p, mv, od, dz, cap, exp, sl, st, cg, cp, cd] = res;
+    const [p, mv, od, dz, cap, exp, sl, st, cg, cp, cd, rt] = res;
     if (p.status === "fulfilled") { setProducts(p.value); dataReadyRef.current = true; }
     if (mv.status === "fulfilled") setMovements(mv.value);
     if (od.status === "fulfilled") setOrders(od.value);
@@ -957,6 +1062,7 @@ export default function App() {
     if (cg.status === "fulfilled") setConsigns(cg.value);
     if (cp.status === "fulfilled") setConsignPayments(cp.value);
     if (cd.status === "fulfilled") setCashDeposits(cd.value);
+    if (rt.status === "fulfilled") setReturns(rt.value);
     if (st.status === "fulfilled" && st.value) setStore((s) => ({ ...s, ...st.value }));
     const failed = res.filter((r) => r.status === "rejected");
     if (failed.length) { console.error("[load]", failed.map((f) => f.reason)); flash("Sebagian data gagal dimuat — cek koneksi/akses"); }
@@ -1317,6 +1423,71 @@ export default function App() {
     return true;
   };
 
+  // ===== Retur & tukar barang =====
+  // ATOMIK + idempoten di server (satu RPC process_return): barang MASIH BAIK kembali
+  // sebagai batch FIFO (modal = HPP saat terjual), barang RUSAK/KEDALUWARSA tidak kembali
+  // ke stok (kerugian tercatat), barang pengganti dipotong FIFO. Uang net dicatat lewat
+  // metode 'settlement' pada baris ber-shift_id, jadi cocokan kas & akuntansi otomatis benar.
+  const applyReturnLocal = (pl) => {
+    // Mode tanpa server (seed/demo): terapkan efek sederhana ke memori.
+    const patch = {};
+    (pl.returns || []).forEach((r) => { if (r.restock) patch[r.productId] = (patch[r.productId] || 0) + r.qty; });
+    (pl.exchanges || []).forEach((e) => { patch[e.productId] = (patch[e.productId] || 0) - e.qty; });
+    setProducts((ps) => ps.map((p) => (patch[p.id] != null ? { ...p, stock: Math.max(0, p.stock + patch[p.id]) } : p)));
+    const rows = [];
+    (pl.returns || []).forEach((r) => rows.push({ id: uid(), productId: r.productId, qty: -r.qty, revenue: -(r.qty * r.unitPrice), cost: r.restock ? -(r.qty * r.unitCost) : 0, date: pl.date, ts: Date.now(), txnId: pl.returnNo, cashier: pl.cashier, method: pl.settlement, qtyLabel: `Retur ${num(r.qty)}`, receiptNo: pl.returnNo, shiftId: pl.shiftId }));
+    (pl.exchanges || []).forEach((e) => { const p = pById(e.productId); rows.push({ id: uid(), productId: e.productId, qty: e.qty, revenue: e.qty * e.unitPrice, cost: (p?.cost || 0) * e.qty, date: pl.date, ts: Date.now(), txnId: pl.returnNo, cashier: pl.cashier, method: pl.settlement, qtyLabel: `Tukar ${num(e.qty)}`, receiptNo: pl.returnNo, shiftId: pl.shiftId }); });
+    setSalesLog((sl) => [...rows, ...sl]);
+    const refundTotal = (pl.returns || []).reduce((a, r) => a + r.qty * r.unitPrice, 0);
+    const exchangeTotal = (pl.exchanges || []).reduce((a, e) => a + e.qty * e.unitPrice, 0);
+    setReturns((rs) => [{
+      id: uid(), returnNo: pl.returnNo, originalTxnId: pl.originalTxnId, kind: exchangeTotal > 0 ? "exchange" : "refund",
+      reason: pl.reason, settlement: pl.settlement, refundTotal, exchangeTotal, netAmount: exchangeTotal - refundTotal, costDelta: 0,
+      cashier: pl.cashier, shiftId: pl.shiftId, note: pl.note || "", ts: Date.now(),
+      items: [
+        ...(pl.returns || []).map((r) => ({ productId: r.productId, productName: pById(r.productId)?.name || "—", direction: "in", qty: r.qty, unitPrice: r.unitPrice, lineTotal: r.qty * r.unitPrice, unitCost: r.unitCost, costTotal: r.qty * r.unitCost, restock: r.restock, condition: r.condition, reason: r.reason })),
+        ...(pl.exchanges || []).map((e) => ({ productId: e.productId, productName: pById(e.productId)?.name || "—", direction: "out", qty: e.qty, unitPrice: e.unitPrice, lineTotal: e.qty * e.unitPrice, unitCost: pById(e.productId)?.cost || 0, costTotal: (pById(e.productId)?.cost || 0) * e.qty, restock: false, condition: null, reason: null })),
+      ],
+    }, ...rs]);
+  };
+
+  const processReturn = async (payload, receipt) => {
+    const full = { ...payload, cashier: cashierName || "Kasir", shiftId: shift?.id || null };
+    const refund = (full.returns || []).reduce((a, r) => a + r.qty * r.unitPrice, 0);
+    const exch = (full.exchanges || []).reduce((a, e) => a + e.qty * e.unitPrice, 0);
+    const net = exch - refund;
+    const doneFlash = () => flash(
+      exch > 0
+        ? (net >= 0 ? `Tukar barang berhasil — pelanggan bayar ${rp(net)}` : `Tukar barang berhasil — kembalikan ${rp(-net)} ke pelanggan`)
+        : `Retur berhasil — kembalikan ${rp(refund)} ke pelanggan`
+    );
+    if (!hasSupabase) {
+      applyReturnLocal(full);
+      if (receipt) { setPrintReceipt(receipt); setReceiptModal(true); }
+      doneFlash();
+      return { status: "ok", local: true };
+    }
+    beginSync(); // pagar: refresh berkala tidak boleh menyela penulisan retur
+    let res;
+    try {
+      res = await ReturnsApi.create(full);
+    } catch (e) {
+      console.error("[retur]", e);
+      flash(e?.message || "Gagal memproses retur — cek koneksi & coba lagi");
+      return { status: "error", error: e };
+    } finally { endSync(); }
+    // Tarik kondisi resmi dari database (stok, penjualan, buku retur) supaya layar = kenyataan.
+    await Promise.all([
+      refreshProducts(true),
+      ReturnsApi.list({ limit: 300 }).then(setReturns).catch(() => {}),
+      Sales.list({ sinceDays: 90 }).then(setSalesLog).catch(() => {}),
+    ]);
+    if (res?.status === "duplicate") { flash("Retur ini sudah pernah diproses"); return res; }
+    if (receipt) { setPrintReceipt(receipt); setReceiptModal(true); }
+    doneFlash();
+    return res || { status: "ok" };
+  };
+
   // ===== Setoran titip jual: pembayaran (bisa bertahap) ke distributor =====
   // Jumlah yang disetor dialokasikan ke kewajiban TERTUA dulu (barang yang paling
   // lama laku). Bisa bayar sebagian — sisanya tetap tercatat sebagai kewajiban.
@@ -1629,6 +1800,19 @@ export default function App() {
     payments: t.payments || null, // net dari arsip; kembalian tidak tercetak ulang
     reprint: true,
   });
+  // Nota retur (dari buku retur) untuk dicetak / dicetak ulang
+  const returnToReceipt = (r) => ({
+    kind: "retur",
+    no: r.returnNo,
+    date: r.ts ? new Date(r.ts).toLocaleString("id-ID", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—",
+    cashier: r.cashier || "—",
+    reasonLabel: RETURN_REASON_LABEL[r.reason] || r.reason || "—",
+    items: (r.items || []).filter((it) => it.direction === "in").map((it) => ({ name: it.productName, qtyLabel: `${num(it.qty)}× ${it.restock ? "" : "(rusak) "}`.trim(), lineTotal: it.lineTotal })),
+    exItems: (r.items || []).filter((it) => it.direction === "out").map((it) => ({ name: it.productName, qtyLabel: `${num(it.qty)}×`, lineTotal: it.lineTotal })),
+    refundTotal: r.refundTotal, exchangeTotal: r.exchangeTotal, net: r.netAmount,
+    settlementLabel: r.settlement ? (PAY_LABEL[r.settlement] || r.settlement) : "—",
+    reprint: true,
+  });
 
   const applySimulation = (rows) => {
     rows.forEach((r) => {
@@ -1803,6 +1987,13 @@ export default function App() {
               onVoid={voidTxn}
             />
           )}
+          {view === "retur" && (
+            <ReturnsView
+              products={products} salesLog={salesLog} returns={returns} managerMode={managerMode}
+              cashierName={cashierName} onSubmit={processReturn}
+              onPrint={(r) => triggerPrint(returnToReceipt(r))} flash={flash}
+            />
+          )}
           {view === "shiftlog" && managerMode && <ShiftLog flash={flash} />}
           {view === "stok" && (
             <Inventory products={products} movements={movements} pById={pById}
@@ -1890,7 +2081,7 @@ export default function App() {
         open={receiptModal}
         onClose={() => setReceiptModal(false)}
         width={400}
-        title="Nota Pembayaran"
+        title={printReceipt?.kind === "retur" ? "Nota Retur" : "Nota Pembayaran"}
         footer={
           <>
             <button className="btn ghost" onClick={() => setReceiptModal(false)}>Tutup</button>
@@ -2189,7 +2380,7 @@ function SalesHistory({ salesLog, products, managerMode, onPrint, onVoid }) {
   const txns = useMemo(() => {
     const map = {};
     salesLog.forEach((s) => {
-      if (!s.txnId) return;
+      if (!s.txnId || String(s.txnId).startsWith("RTR-")) return; // baris retur tampil di tab Retur & Tukar
       if (!map[s.txnId]) map[s.txnId] = { txnId: s.txnId, ts: s.ts, cashier: s.cashier || "—", method: s.method || "-", payments: null, no: null, items: [], total: 0, qty: 0 };
       const t = map[s.txnId];
       t.items.push({ pid: s.productId, name: pName(s.productId), qty: s.qty, qtyLabel: s.qtyLabel || `${num(s.qty)} ${pUnit(s.productId)}`.trim(), lineTotal: s.revenue });
@@ -5044,6 +5235,413 @@ function DepositForm({ entry, defaultAccount, onClose, onSave }) {
 
 /* =============================== Styles =============================== */
 
+/* ============================ Retur & Tukar ============================ */
+function ReturnsView({ products, salesLog, returns, managerMode, cashierName, onSubmit, onPrint, flash }) {
+  const [flowOpen, setFlowOpen] = useState(false);
+  const [range, setRange] = useState("today");
+  const [hq, setHq] = useState("");
+  const [openRow, setOpenRow] = useState({});
+  const pById = (id) => products.find((p) => p.id === id);
+
+  // Kelompokkan penjualan jadi transaksi untuk pemilih "cari nota" (abaikan baris retur).
+  const salesTxns = useMemo(() => {
+    const map = {};
+    salesLog.forEach((s) => {
+      if (!s.txnId || String(s.txnId).startsWith("RTR-")) return;
+      if (!map[s.txnId]) map[s.txnId] = { txnId: s.txnId, no: s.receiptNo || null, ts: s.ts, cashier: s.cashier || "—", method: s.method || "-", lines: {} };
+      const t = map[s.txnId];
+      if (s.ts && (!t.ts || s.ts < t.ts)) t.ts = s.ts;
+      if (!t.no && s.receiptNo) t.no = s.receiptNo;
+      const pid = s.productId;
+      if (!t.lines[pid]) t.lines[pid] = { pid, qty: 0, revenue: 0, cost: 0 };
+      t.lines[pid].qty += s.qty; t.lines[pid].revenue += s.revenue; t.lines[pid].cost += s.cost;
+    });
+    const noFromTs = (ts) => { if (!ts) return "INV-—"; const d = new Date(ts); const p = (n) => String(n).padStart(2, "0"); return `INV-${String(d.getFullYear()).slice(2)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; };
+    return Object.values(map).map((t) => {
+      const items = Object.values(t.lines).filter((l) => l.qty > 0).map((l) => {
+        const p = pById(l.pid);
+        return { pid: l.pid, name: p?.name || "Barang", unit: p?.unit || "", soldQty: l.qty, unitPrice: l.qty ? l.revenue / l.qty : 0, unitCost: l.qty ? l.cost / l.qty : 0 };
+      });
+      return { ...t, no: t.no || noFromTs(t.ts), items, total: items.reduce((a, l) => a + l.soldQty * l.unitPrice, 0), qty: items.reduce((a, l) => a + l.soldQty, 0) };
+    }).filter((t) => t.items.length > 0).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  }, [salesLog, products]);
+
+  // Sudah diretur per (nota, barang) untuk cegah retur berlebih.
+  const returnedByTxn = useMemo(() => {
+    const m = {};
+    (returns || []).forEach((r) => {
+      if (!r.originalTxnId) return;
+      (r.items || []).forEach((it) => {
+        if (it.direction !== "in" || !it.productId) return;
+        const k = r.originalTxnId + "|" + it.productId;
+        m[k] = (m[k] || 0) + it.qty;
+      });
+    });
+    return m;
+  }, [returns]);
+
+  const isToday = (ts) => ts && new Date(ts).toDateString() === new Date().toDateString();
+  const effRange = managerMode ? range : "today";
+  let hist = effRange === "today" ? (returns || []).filter((r) => isToday(r.ts)) : (returns || []);
+  const term = hq.trim().toLowerCase();
+  if (term) hist = hist.filter((r) => (r.returnNo + " " + r.cashier + " " + (r.items || []).map((i) => i.productName).join(" ")).toLowerCase().includes(term));
+
+  const totRefund = hist.reduce((a, r) => a + (r.netAmount < 0 ? -r.netAmount : 0), 0);
+  const totDamaged = hist.reduce((a, r) => a + (r.items || []).filter((it) => it.direction === "in" && !it.restock).reduce((x, it) => x + it.costTotal, 0), 0);
+  const totExchange = hist.filter((r) => r.kind === "exchange").length;
+  const fmtTime = (ts) => ts ? new Date(ts).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+
+  return (
+    <div className="stack">
+      <div className="acc-toolbar">
+        {managerMode ? (
+          <div className="seg">
+            <button className={range === "today" ? "on" : ""} onClick={() => setRange("today")}>Hari ini</button>
+            <button className={range === "all" ? "on" : ""} onClick={() => setRange("all")}>Semua</button>
+          </div>
+        ) : <div className="muted" style={{ fontSize: 13 }}>Retur & tukar <b>hari ini</b></div>}
+        <div className="search" style={{ maxWidth: 260 }}>
+          <Search size={15} />
+          <input placeholder="Cari no. retur / kasir / barang…" value={hq} onChange={(e) => setHq(e.target.value)} />
+        </div>
+        <button className="btn" onClick={() => setFlowOpen(true)}><Undo2 size={16} /> Retur Baru</button>
+      </div>
+
+      {managerMode && (
+        <div className="grid-4">
+          <Stat icon={Undo2} accent label="Jumlah retur" value={num(hist.length)} sub={effRange === "today" ? "hari ini" : "total"} />
+          <Stat icon={Banknote} label="Uang dikembalikan" value={rp(totRefund)} sub="ke pelanggan" />
+          <Stat icon={PackageX} label="Kerugian barang rusak" value={rp(totDamaged)} sub="tidak bisa dijual lagi" />
+          <Stat icon={ArrowLeftRight} label="Tukar barang" value={num(totExchange)} sub="dari total retur" />
+        </div>
+      )}
+
+      <section className="card">
+        <div className="card-head"><h2>Riwayat retur & tukar</h2><span className="muted">{hist.length} retur</span></div>
+        <div className="txn-list">
+          {hist.length === 0 && <div className="empty">Belum ada retur pada periode ini. Klik <b>Retur Baru</b> untuk memulai.</div>}
+          {hist.map((r) => {
+            const ins = (r.items || []).filter((it) => it.direction === "in");
+            const outs = (r.items || []).filter((it) => it.direction === "out");
+            return (
+              <div key={r.id} className={`txn ${openRow[r.id] ? "open" : ""}`}>
+                <div className="txn-head" role="button" tabIndex={0}
+                  onClick={() => setOpenRow((o) => ({ ...o, [r.id]: !o[r.id] }))}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setOpenRow((o) => ({ ...o, [r.id]: !o[r.id] })); }}>
+                  <div className="txn-time">{fmtTime(r.ts)} <span className="txn-no">{r.returnNo}</span></div>
+                  <div className={`ret-badge ${r.kind === "exchange" ? "ex" : "rf"}`}>{r.kind === "exchange" ? <><ArrowLeftRight size={11} /> Tukar</> : <><Undo2 size={11} /> Retur</>}</div>
+                  <div className="ret-reason-col">{RETURN_REASON_LABEL[r.reason] || r.reason}</div>
+                  <div className={`ret-net ${r.netAmount >= 0 ? "pos" : "neg"}`}>{r.netAmount >= 0 ? "+" : "−"}{rp(Math.abs(r.netAmount))}</div>
+                  <div className="txn-acts" onClick={(e) => e.stopPropagation()}>
+                    <button className="icon-btn xs" title="Cetak nota retur" onClick={() => onPrint(r)}><Printer size={15} /></button>
+                  </div>
+                  <ChevronRight size={15} className="txn-caret" />
+                </div>
+                {openRow[r.id] && (
+                  <div className="txn-items">
+                    {ins.map((it, i) => (
+                      <div key={"i" + i} className="txn-item">
+                        <span><ArrowDownRight size={13} className="ret-ic-in" /> {num(it.qty)}× {it.productName} {it.restock ? <span className="ret-tag ok">masuk stok</span> : <span className="ret-tag bad">{RETURN_CONDITION_LABEL[it.condition] || "rusak"}</span>}</span>
+                        <span className="tab">−{rp(it.lineTotal)}</span>
+                      </div>
+                    ))}
+                    {outs.map((it, i) => (
+                      <div key={"o" + i} className="txn-item">
+                        <span><ArrowUpRight size={13} className="ret-ic-out" /> {num(it.qty)}× {it.productName} <span className="ret-tag ex">pengganti</span></span>
+                        <span className="tab">{rp(it.lineTotal)}</span>
+                      </div>
+                    ))}
+                    <div className="txn-item ret-foot-sep">
+                      <span className="muted">{r.netAmount >= 0 ? "Pelanggan bayar" : "Uang dikembalikan"}{r.settlement ? ` · ${PAY_LABEL[r.settlement] || r.settlement}` : ""} · Kasir {r.cashier}</span>
+                      <span className="tab">{rp(Math.abs(r.netAmount))}</span>
+                    </div>
+                    {r.note && <div className="txn-item"><span className="muted">Catatan: {r.note}</span></div>}
+                    <div className="txn-item-foot">
+                      <button className="btn ghost sm" onClick={() => onPrint(r)}><Printer size={14} /> Cetak nota retur</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {flowOpen && (
+        <ReturnFlow
+          products={products} salesTxns={salesTxns} returnedByTxn={returnedByTxn}
+          cashierName={cashierName} onClose={() => setFlowOpen(false)} onSubmit={onSubmit}
+        />
+      )}
+    </div>
+  );
+}
+
+function ReturnFlow({ products, salesTxns, returnedByTxn, cashierName, onClose, onSubmit }) {
+  const [srcMode, setSrcMode] = useState("nota"); // 'nota' | 'manual'
+  const [srcTxn, setSrcTxn] = useState(null);
+  const [txnQ, setTxnQ] = useState("");
+  const [retSel, setRetSel] = useState({});        // pid -> { qty, condition }
+  const [manualItems, setManualItems] = useState([]); // [{pid, qty, unitPrice, condition}]
+  const [manualQ, setManualQ] = useState("");
+  const [exchange, setExchange] = useState(false);
+  const [exSel, setExSel] = useState({});          // pid -> qty
+  const [exQ, setExQ] = useState("");
+  const [settlement, setSettlement] = useState("cash");
+  const [reason, setReason] = useState("rusak");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const pById = (id) => products.find((p) => p.id === id);
+  const fmtT = (ts) => ts ? new Date(ts).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+
+  const pickList = useMemo(() => {
+    const t = txnQ.trim().toLowerCase();
+    if (!t) return salesTxns.slice(0, 40);
+    return salesTxns.filter((x) => (x.no + " " + x.items.map((i) => i.name).join(" ")).toLowerCase().includes(t)).slice(0, 40);
+  }, [salesTxns, txnQ]);
+  const filterProd = (term) => { const t = term.trim().toLowerCase(); if (!t) return []; return products.filter((p) => (p.name + " " + (p.sku || "") + " " + (p.code || "")).toLowerCase().includes(t)).slice(0, 8); };
+
+  const srcLines = useMemo(() => {
+    if (srcMode !== "nota" || !srcTxn) return [];
+    return srcTxn.items.map((l) => {
+      const already = returnedByTxn[srcTxn.txnId + "|" + l.pid] || 0;
+      return { ...l, already, maxQty: Math.max(0, l.soldQty - already) };
+    });
+  }, [srcMode, srcTxn, returnedByTxn]);
+
+  const returnLines = useMemo(() => {
+    if (srcMode === "nota") {
+      return srcLines.filter((l) => (retSel[l.pid]?.qty || 0) > 0).map((l) => {
+        const cond = retSel[l.pid]?.condition || "baik";
+        const c = RETURN_CONDITIONS.find((x) => x.key === cond);
+        return { productId: l.pid, name: l.name, qty: retSel[l.pid].qty, unitPrice: l.unitPrice, unitCost: l.unitCost, restock: !!c?.restock, condition: cond };
+      });
+    }
+    return manualItems.filter((m) => m.qty > 0 && m.pid).map((m) => {
+      const c = RETURN_CONDITIONS.find((x) => x.key === m.condition) || RETURN_CONDITIONS[0];
+      const p = pById(m.pid);
+      return { productId: m.pid, name: p?.name || "Barang", qty: m.qty, unitPrice: Number(m.unitPrice) || 0, unitCost: p?.cost || 0, restock: !!c.restock, condition: m.condition };
+    });
+  }, [srcMode, srcLines, retSel, manualItems, products]);
+
+  const exLines = useMemo(() => Object.entries(exSel).filter(([, q]) => q > 0).map(([pid, q]) => {
+    const p = pById(pid);
+    return { productId: pid, name: p?.name || "Barang", qty: q, unitPrice: effPrice(p?.price || 0, p?.promo), stock: p?.stock || 0 };
+  }), [exSel, products]);
+
+  const refundTotal = returnLines.reduce((a, l) => a + l.qty * l.unitPrice, 0);
+  const exchangeTotal = exchange ? exLines.reduce((a, l) => a + l.qty * l.unitPrice, 0) : 0;
+  const net = exchangeTotal - refundTotal;
+  const exStockOk = !exchange || exLines.every((l) => l.qty <= l.stock);
+  const canSubmit = returnLines.length > 0 && (!exchange || exLines.length > 0) && exStockOk && !busy;
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setBusy(true);
+    const returnNo = returnNoGen();
+    const payload = {
+      clientId: uid(), returnNo, originalTxnId: srcMode === "nota" ? (srcTxn?.txnId || null) : null,
+      kind: exchange && exLines.length ? "exchange" : "refund", reason, settlement: net !== 0 ? settlement : null,
+      note: note.trim() || null, date: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
+      returns: returnLines.map((l) => ({ productId: l.productId, qty: l.qty, unitPrice: l.unitPrice, unitCost: l.unitCost, restock: l.restock, condition: l.condition, reason })),
+      exchanges: exchange ? exLines.map((l) => ({ productId: l.productId, qty: l.qty, unitPrice: l.unitPrice })) : [],
+    };
+    const receipt = {
+      kind: "retur", no: returnNo,
+      date: new Date().toLocaleString("id-ID", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }),
+      cashier: cashierName || "Kasir", reasonLabel: RETURN_REASON_LABEL[reason] || reason,
+      items: returnLines.map((l) => ({ name: l.name, qtyLabel: `${num(l.qty)}× ${l.restock ? "" : "(rusak) "}`.trim(), lineTotal: l.qty * l.unitPrice })),
+      exItems: exchange ? exLines.map((l) => ({ name: l.name, qtyLabel: `${num(l.qty)}×`, lineTotal: l.qty * l.unitPrice })) : [],
+      refundTotal, exchangeTotal, net, settlementLabel: PAY_LABEL[settlement] || settlement,
+    };
+    const res = await onSubmit(payload, receipt);
+    setBusy(false);
+    if (res && res.status !== "error") onClose();
+  };
+
+  const btnLabel = busy ? "Memproses…"
+    : (!exchange || !exLines.length) ? `Proses — kembalikan ${rp(refundTotal)}`
+    : net > 0 ? `Proses — tagih ${rp(net)}`
+    : net < 0 ? `Proses — kembalikan ${rp(-net)}`
+    : "Proses tukar (pas)";
+
+  return (
+    <Modal open onClose={() => { if (!busy) onClose(); }} width={640} title="Retur / Tukar Barang"
+      footer={<>
+        <button className="btn ghost" disabled={busy} onClick={onClose}>Batal</button>
+        <button className="btn" disabled={!canSubmit} onClick={submit}>{busy ? btnLabel : <><Check size={15} /> {btnLabel}</>}</button>
+      </>}>
+      <div className="ret-flow">
+        <div className="ret-seg">
+          <button className={`ret-seg-btn ${srcMode === "nota" ? "on" : ""}`} onClick={() => { setSrcMode("nota"); }}><ClipboardList size={15} /> Dari nota penjualan</button>
+          <button className={`ret-seg-btn ${srcMode === "manual" ? "on" : ""}`} onClick={() => { setSrcMode("manual"); }}><PackageX size={15} /> Tanpa nota</button>
+        </div>
+
+        {srcMode === "nota" && !srcTxn && (
+          <div className="ret-block">
+            <div className="ret-label">Pilih transaksi asal</div>
+            <div className="search"><Search size={15} /><input placeholder="Cari no. nota / barang…" value={txnQ} onChange={(e) => setTxnQ(e.target.value)} /></div>
+            <div className="ret-picker">
+              {pickList.length === 0 && <div className="empty">Tidak ada transaksi cocok.</div>}
+              {pickList.map((t) => (
+                <button key={t.txnId} className="ret-opt" onClick={() => { setSrcTxn(t); setRetSel({}); }}>
+                  <div className="ret-opt-l"><div className="ret-opt-no">{t.no}</div><div className="muted xs">{fmtT(t.ts)} · {num(t.qty)} brg · {t.items.map((i) => i.name).slice(0, 2).join(", ")}{t.items.length > 2 ? "…" : ""}</div></div>
+                  <div className="ret-opt-tot">{rp(t.total)}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {srcMode === "nota" && srcTxn && (
+          <div className="ret-block">
+            <div className="ret-src-head">
+              <div><span className="ret-label" style={{ display: "inline" }}>Nota</span> <b>{srcTxn.no}</b> <span className="muted xs">· {fmtT(srcTxn.ts)}</span></div>
+              <button className="link-btn" onClick={() => { setSrcTxn(null); setRetSel({}); }}>Ganti nota</button>
+            </div>
+            <div className="ret-lines">
+              {srcLines.map((l) => {
+                const sel = retSel[l.pid] || { qty: 0, condition: "baik" };
+                const off = l.maxQty <= 0;
+                return (
+                  <div key={l.pid} className={`ret-line ${sel.qty > 0 ? "on" : ""} ${off ? "off" : ""}`}>
+                    <div className="ret-line-main">
+                      <div className="ret-line-name">{l.name}</div>
+                      <div className="muted xs">Beli {num(l.soldQty)} {l.unit} · {rp(l.unitPrice)}/{l.unit}{l.already > 0 ? ` · sudah diretur ${num(l.already)}` : ""}{off ? " · habis diretur" : ""}</div>
+                    </div>
+                    <div className="stepper sm">
+                      <button disabled={sel.qty <= 0} onClick={() => setRetSel((s) => ({ ...s, [l.pid]: { ...sel, qty: Math.max(0, sel.qty - 1) } }))}><Minus size={14} /></button>
+                      <span>{sel.qty}</span>
+                      <button disabled={sel.qty >= l.maxQty} onClick={() => setRetSel((s) => ({ ...s, [l.pid]: { ...sel, qty: Math.min(l.maxQty, sel.qty + 1) } }))}><Plus size={14} /></button>
+                    </div>
+                    {sel.qty > 0 && (
+                      <select className="ret-cond" value={sel.condition} onChange={(e) => setRetSel((s) => ({ ...s, [l.pid]: { ...sel, condition: e.target.value } }))}>
+                        {RETURN_CONDITIONS.map((c) => <option key={c.key} value={c.key}>{c.label} — {c.hint}</option>)}
+                      </select>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {srcMode === "manual" && (
+          <div className="ret-block">
+            <div className="ret-label">Barang yang diretur</div>
+            {manualItems.map((m, i) => { const p = pById(m.pid); return (
+              <div key={i} className="ret-line on">
+                <div className="ret-line-main">
+                  <div className="ret-line-name">{p?.name || "—"}</div>
+                  <div className="ret-manual-row">
+                    <div className="stepper sm">
+                      <button disabled={m.qty <= 1} onClick={() => setManualItems((a) => a.map((x, j) => (j === i ? { ...x, qty: Math.max(1, x.qty - 1) } : x)))}><Minus size={14} /></button>
+                      <span>{m.qty}</span>
+                      <button onClick={() => setManualItems((a) => a.map((x, j) => (j === i ? { ...x, qty: x.qty + 1 } : x)))}><Plus size={14} /></button>
+                    </div>
+                    <div className="ret-price-in"><span>Rp</span><input type="number" value={m.unitPrice} onChange={(e) => setManualItems((a) => a.map((x, j) => (j === i ? { ...x, unitPrice: e.target.value } : x)))} /></div>
+                    <select className="ret-cond" value={m.condition} onChange={(e) => setManualItems((a) => a.map((x, j) => (j === i ? { ...x, condition: e.target.value } : x)))}>
+                      {RETURN_CONDITIONS.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+                    </select>
+                    <button className="icon-btn xs" onClick={() => setManualItems((a) => a.filter((_, j) => j !== i))}><X size={13} /></button>
+                  </div>
+                </div>
+              </div>
+            ); })}
+            <div className="search" style={{ marginTop: 8 }}><Search size={15} /><input placeholder="Cari barang untuk diretur…" value={manualQ} onChange={(e) => setManualQ(e.target.value)} /></div>
+            {manualQ.trim() && (
+              <div className="ret-cat-picker">
+                {filterProd(manualQ).map((p) => (
+                  <button key={p.id} className="ret-cat-opt" onClick={() => { if (!manualItems.find((m) => m.pid === p.id)) setManualItems((a) => [...a, { pid: p.id, qty: 1, unitPrice: effPrice(p.price, p.promo), condition: "baik" }]); setManualQ(""); }}>
+                    <span>{p.name}</span><span className="muted xs">{rp(effPrice(p.price, p.promo))}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {returnLines.length > 0 && (
+          <div className="ret-block">
+            <div className="ret-label">Alasan retur</div>
+            <div className="ret-pills">
+              {RETURN_REASONS.map((r) => (
+                <button key={r.key} className={`ret-pill ${reason === r.key ? "on" : ""}`} onClick={() => setReason(r.key)}>{r.label}</button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {returnLines.length > 0 && (
+          <div className="ret-block">
+            <div className="ret-seg">
+              <button className={`ret-seg-btn ${!exchange ? "on" : ""}`} onClick={() => setExchange(false)}><Banknote size={15} /> Kembalikan uang</button>
+              <button className={`ret-seg-btn ${exchange ? "on" : ""}`} onClick={() => setExchange(true)}><ArrowLeftRight size={15} /> Tukar barang</button>
+            </div>
+            {exchange && (
+              <div style={{ marginTop: 10 }}>
+                <div className="ret-label">Barang pengganti</div>
+                <div className="ret-lines">
+                  {exLines.map((l) => (
+                    <div key={l.productId} className="ret-line on">
+                      <div className="ret-line-main">
+                        <div className="ret-line-name">{l.name}</div>
+                        <div className="muted xs">{rp(l.unitPrice)} · stok {num(l.stock)}{l.qty > l.stock ? " · STOK KURANG" : ""}</div>
+                      </div>
+                      <div className="stepper sm">
+                        <button onClick={() => setExSel((s) => { const n = { ...s }; const v = (n[l.productId] || 0) - 1; if (v <= 0) delete n[l.productId]; else n[l.productId] = v; return n; })}><Minus size={14} /></button>
+                        <span>{l.qty}</span>
+                        <button disabled={l.qty >= l.stock} onClick={() => setExSel((s) => ({ ...s, [l.productId]: (s[l.productId] || 0) + 1 }))}><Plus size={14} /></button>
+                      </div>
+                      <div className="ret-line-tot tab">{rp(l.qty * l.unitPrice)}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="search" style={{ marginTop: 8 }}><Search size={15} /><input placeholder="Cari barang pengganti…" value={exQ} onChange={(e) => setExQ(e.target.value)} /></div>
+                {exQ.trim() && (
+                  <div className="ret-cat-picker">
+                    {filterProd(exQ).map((p) => {
+                      const left = p.stock - (exSel[p.id] || 0);
+                      return (
+                        <button key={p.id} className="ret-cat-opt" disabled={left < 1} onClick={() => { setExSel((s) => ({ ...s, [p.id]: (s[p.id] || 0) + 1 })); setExQ(""); }}>
+                          <span>{p.name}</span><span className="muted xs">{rp(effPrice(p.price, p.promo))} · stok {num(p.stock)}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {returnLines.length > 0 && (
+          <div className="ret-summary">
+            <div className="ret-sum-row"><span>Nilai barang diretur</span><span className="tab">−{rp(refundTotal)}</span></div>
+            {exchange && <div className="ret-sum-row"><span>Nilai barang pengganti</span><span className="tab">+{rp(exchangeTotal)}</span></div>}
+            <div className={`ret-sum-net ${net >= 0 ? "pos" : "neg"}`}>
+              <span>{net > 0 ? "Pelanggan harus bayar" : net < 0 ? "Kembalikan ke pelanggan" : "Tidak ada uang berpindah"}</span>
+              <span className="tab big">{rp(Math.abs(net))}</span>
+            </div>
+            {net !== 0 && (
+              <>
+                <div className="ret-label" style={{ marginTop: 4 }}>{net > 0 ? "Pelanggan bayar via" : "Kembalikan uang via"}</div>
+                <div className="ret-methods">
+                  {REFUND_METHODS.map((m) => { const Icon = m.icon; return (
+                    <button key={m.key} className={`pay-method ${settlement === m.key ? "on" : ""}`} onClick={() => setSettlement(m.key)}><Icon size={16} /><span>{m.label}</span></button>
+                  ); })}
+                </div>
+              </>
+            )}
+            <div className="ret-note"><Pencil size={13} /><input placeholder="Catatan (opsional)" value={note} onChange={(e) => setNote(e.target.value)} /></div>
+            {exchange && !exStockOk && <div className="pay-note warn">Ada barang pengganti melebihi stok. Kurangi jumlahnya dulu.</div>}
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 function Style() {
   return (
     <style>{`
@@ -5836,7 +6434,83 @@ function Style() {
         .content{padding:18px}
         .grid-4{grid-template-columns:1fr}
         .alert-chip span{display:none}
+        .ret-manual-row{flex-wrap:wrap}
+        .ret-methods{grid-template-columns:repeat(2,1fr)}
       }
+
+      /* ===== Retur & Tukar ===== */
+      .ret-badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:700;padding:3px 8px;border-radius:999px;white-space:nowrap}
+      .ret-badge.rf{background:var(--accent-soft);color:var(--accent)}
+      .ret-badge.ex{background:var(--teal-soft);color:var(--teal)}
+      .ret-reason-col{font-size:12.5px;color:var(--ink-soft);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .ret-net{font-variant-numeric:tabular-nums;font-weight:700;font-size:14px}
+      .ret-net.pos{color:var(--teal)}
+      .ret-net.neg{color:var(--accent)}
+      .ret-tag{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px;margin-left:4px;vertical-align:middle}
+      .ret-tag.ok{background:var(--ok-bg);color:var(--ok)}
+      .ret-tag.bad{background:var(--crit-bg);color:var(--crit)}
+      .ret-tag.ex{background:var(--teal-soft);color:var(--teal)}
+      .ret-ic-in{color:var(--accent);vertical-align:middle}
+      .ret-ic-out{color:var(--teal);vertical-align:middle}
+      .ret-foot-sep{border-top:1px dashed var(--line);margin-top:4px;padding-top:8px}
+
+      .ret-flow{display:flex;flex-direction:column;gap:14px}
+      .ret-seg{display:flex;background:var(--surface-2);border-radius:10px;padding:3px;gap:2px}
+      .ret-seg-btn{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;border:none;background:none;padding:10px 6px;
+        border-radius:8px;font:inherit;font-weight:600;font-size:13px;color:var(--ink-soft);cursor:pointer;transition:background .15s,color .15s}
+      .ret-seg-btn.on{background:var(--surface);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.1)}
+      .ret-block{display:flex;flex-direction:column;gap:8px}
+      .ret-label{font-size:12px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.03em}
+
+      .ret-picker{display:flex;flex-direction:column;gap:6px;max-height:230px;overflow-y:auto}
+      .ret-opt{display:flex;align-items:center;justify-content:space-between;gap:10px;text-align:left;
+        border:1px solid var(--line);background:var(--surface-2);border-radius:var(--r-sm);padding:10px 12px;font:inherit;color:var(--ink);cursor:pointer;transition:border-color .15s,background .15s}
+      .ret-opt:hover{border-color:var(--accent);background:var(--surface-3)}
+      .ret-opt-l{min-width:0}
+      .ret-opt-no{font-weight:700;font-size:13px;font-variant-numeric:tabular-nums}
+      .ret-opt-tot{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+      .ret-src-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+
+      .ret-lines{display:flex;flex-direction:column;gap:6px}
+      .ret-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border:1px solid var(--line);background:var(--surface-2);border-radius:var(--r-sm);padding:9px 11px;transition:border-color .15s,background .15s}
+      .ret-line.on{border-color:var(--accent);background:var(--accent-soft)}
+      .ret-line.off{opacity:.5}
+      .ret-line-main{flex:1;min-width:120px}
+      .ret-line-name{font-weight:600;font-size:13.5px}
+      .ret-line-tot{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+      .ret-cond{flex-basis:100%;border:1px solid var(--line);background:var(--surface);border-radius:var(--r-xs);
+        padding:6px 8px;font:inherit;font-size:12px;color:var(--ink);cursor:pointer}
+      .ret-manual-row{display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap}
+      .ret-price-in{display:flex;align-items:center;gap:4px;border:1px solid var(--line);background:var(--surface);border-radius:var(--r-xs);padding:0 8px}
+      .ret-price-in span{font-size:11px;color:var(--ink-faint)}
+      .ret-price-in input{width:74px;border:none;background:none;padding:7px 0;font:inherit;font-size:12.5px;color:var(--ink);font-variant-numeric:tabular-nums}
+      .ret-price-in input:focus{outline:none}
+      .ret-cond{max-width:100%}
+      .ret-manual-row .ret-cond{flex-basis:auto;flex:1;min-width:120px}
+
+      .ret-cat-picker{display:flex;flex-direction:column;gap:4px;max-height:190px;overflow-y:auto;border:1px solid var(--line);border-radius:var(--r-sm);padding:5px;background:var(--surface)}
+      .ret-cat-opt{display:flex;align-items:center;justify-content:space-between;gap:10px;text-align:left;border:none;background:none;
+        border-radius:var(--r-xs);padding:8px 10px;font:inherit;font-size:13px;color:var(--ink);cursor:pointer;transition:background .12s}
+      .ret-cat-opt:hover:not(:disabled){background:var(--surface-2)}
+      .ret-cat-opt:disabled{opacity:.4;cursor:not-allowed}
+
+      .ret-pills{display:flex;flex-wrap:wrap;gap:6px}
+      .ret-pill{border:1px solid var(--line);background:var(--surface-2);border-radius:999px;padding:7px 13px;font:inherit;
+        font-size:12.5px;font-weight:600;color:var(--ink-soft);cursor:pointer;transition:all .15s}
+      .ret-pill:hover{border-color:var(--accent);color:var(--accent)}
+      .ret-pill.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+
+      .ret-methods{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:2px}
+
+      .ret-summary{display:flex;flex-direction:column;gap:8px;border:1px solid var(--line);background:var(--surface-2);border-radius:var(--r);padding:14px}
+      .ret-sum-row{display:flex;align-items:center;justify-content:space-between;font-size:13px;color:var(--ink-soft)}
+      .ret-sum-net{display:flex;align-items:center;justify-content:space-between;padding-top:8px;margin-top:2px;border-top:1px dashed var(--line);font-weight:700}
+      .ret-sum-net .big{font-size:20px;font-variant-numeric:tabular-nums}
+      .ret-sum-net.pos{color:var(--teal)}
+      .ret-sum-net.neg{color:var(--accent)}
+      .ret-note{display:flex;align-items:center;gap:8px;border:1px solid var(--line);background:var(--surface);border-radius:var(--r-sm);padding:0 10px;color:var(--ink-faint)}
+      .ret-note input{flex:1;border:none;background:none;padding:9px 0;font:inherit;font-size:13px;color:var(--ink)}
+      .ret-note input:focus{outline:none}
     `}</style>
   );
 }

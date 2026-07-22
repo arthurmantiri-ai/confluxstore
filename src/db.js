@@ -435,6 +435,68 @@ export const Sales = {
   },
 };
 
+/* ============================ RETUR & TUKAR ============================ */
+const rowToReturn = (r) => ({
+  id: r.id, returnNo: r.return_no, clientId: r.client_id || null,
+  originalTxnId: r.original_txn_id || null, kind: r.kind || "refund",
+  reason: r.reason || "", settlement: r.settlement || null,
+  refundTotal: Number(r.refund_total || 0), exchangeTotal: Number(r.exchange_total || 0),
+  netAmount: Number(r.net_amount || 0), costDelta: Number(r.cost_delta || 0),
+  cashier: r.cashier || "—", shiftId: r.shift_id || null, note: r.note || "",
+  ts: r.created_at ? Date.parse(r.created_at) : null,
+});
+const rowToReturnItem = (r) => ({
+  id: r.id, returnId: r.return_id, productId: r.product_id || null,
+  productName: r.product_name || "—", direction: r.direction,
+  qty: Number(r.qty || 0), unitPrice: Number(r.unit_price || 0), lineTotal: Number(r.line_total || 0),
+  unitCost: Number(r.unit_cost || 0), costTotal: Number(r.cost_total || 0),
+  restock: !!r.restock, condition: r.condition || null, reason: r.reason || null,
+});
+export const Returns = {
+  // Daftar retur (kepala) + baris barangnya, digabung per nota.
+  async list(opts = {}) {
+    let q = supabase.from("returns").select("*").order("created_at", { ascending: false });
+    if (opts.limit) q = q.limit(opts.limit);
+    const { data, error } = await q;
+    if (error) throw error;
+    const heads = data || [];
+    if (!heads.length) return [];
+    const { data: its, error: e2 } = await supabase
+      .from("return_items").select("*").in("return_id", heads.map((h) => h.id));
+    if (e2) throw e2;
+    const byId = {};
+    (its || []).forEach((r) => { (byId[r.return_id] = byId[r.return_id] || []).push(rowToReturnItem(r)); });
+    return heads.map((h) => ({ ...rowToReturn(h), items: byId[h.id] || [] }));
+  },
+  // Proses retur/tukar ATOMIK + idempoten di server (RPC process_return).
+  // payload = { clientId, returnNo, originalTxnId, kind, reason, settlement, cashier,
+  //             shiftId, note, date, returns:[{productId,qty,unitPrice,unitCost,restock,condition,reason}],
+  //             exchanges:[{productId,qty,unitPrice}] }
+  async create(payload) {
+    const { data, error } = await supabase.rpc("process_return", {
+      p_client_id: payload.clientId,
+      p_return_no: payload.returnNo,
+      p_original_txn_id: payload.originalTxnId ?? null,
+      p_kind: payload.kind || "refund",
+      p_reason: payload.reason ?? null,
+      p_settlement: payload.settlement ?? null,
+      p_cashier: payload.cashier ?? null,
+      p_shift_id: payload.shiftId ?? null,
+      p_note: payload.note ?? null,
+      p_date: payload.date ?? null,
+      p_returns: (payload.returns || []).map((r) => ({
+        product_id: r.productId, qty: r.qty, unit_price: r.unitPrice, unit_cost: r.unitCost,
+        restock: !!r.restock, condition: r.condition || null, reason: r.reason || null,
+      })),
+      p_exchanges: (payload.exchanges || []).map((e) => ({
+        product_id: e.productId, qty: e.qty, unit_price: e.unitPrice,
+      })),
+    });
+    if (error) throw error;
+    return data || {}; // { status:"ok"|"duplicate", id, return_no, refund_total, exchange_total, net_amount }
+  },
+};
+
 /* ============================ TITIP JUAL (KONSINYASI) ============================ */
 const rowToConsign = (r) => ({
   id: r.id, productId: r.product_id, productName: r.product_name || "—",
