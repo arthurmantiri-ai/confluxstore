@@ -2540,6 +2540,7 @@ function SalesHistory({ salesLog, products, managerMode, onPrint, onVoid }) {
 function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDelete, onStockChange, onFlash }) {
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState("all");
+  const [exportingXlsx, setExportingXlsx] = useState(false); // sedang membuat file Excel stok & harga
   const [moveFor, setMoveFor] = useState(null);
   const [moveType, setMoveType] = useState("in");
   const [qty, setQty] = useState(1);
@@ -2712,6 +2713,188 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
   const openMove = (p, type) => { setMoveFor(p); setMoveType(type); setQty(1); setBuyCost(p.cost || 0); setBuyExpiry(""); setNote(type === "in" ? (p.isConsign ? "Terima barang titipan" : "Pembelian supplier") : "Penyesuaian"); };
   const submitMove = () => { onMove(moveFor.id, moveType, Number(qty) || 0, note, moveType === "in" ? (Number(buyCost) || 0) : undefined, moveType === "in" ? (buyExpiry || null) : undefined); setMoveFor(null); };
 
+  // ============ Export "Daftar Stok & Harga" (kirim ke coffee shop) ============
+  // HANYA-BACA: tidak mengubah data apa pun. Menampilkan HARGA JUAL + STOK + STATUS
+  // dalam bahasa pelanggan (Tersedia / Menipis / Habis). Sengaja TIDAK menampilkan
+  // modal/HPP agar margin internal tidak bocor ke pelanggan. Mengikuti barang yang
+  // sedang TAMPIL (filter kategori + kata kunci pencarian) supaya "yang dilihat =
+  // yang diexport"; ruang lingkup ditulis jelas di dokumen agar tidak salah kirim.
+  const exportStokHarga = async () => {
+    if (!list.length) { onFlash && onFlash("Tidak ada barang untuk diexport"); return; }
+    setExportingXlsx(true);
+    try {
+      const ExcelJS = (await import("exceljs")).default;
+      const wb = new ExcelJS.Workbook();
+      wb.creator = "Conflux Coffee Club";
+      wb.created = new Date();
+
+      // Palet warna — sama dengan export Akuntansi agar tampilan konsisten
+      const C = {
+        dark: "FF121A16", surface: "FF1B2521", cream: "FFECE7DA", coral: "FFE2514D",
+        teal: "FF3E7D5A", amber: "FFB4791F", ink: "FF24302B",
+        rowA: "FFFFFFFF", rowB: "FFFAF4EA", hairline: "FFE7E0D2", habisBg: "FFFBECEB",
+      };
+      const money = '"Rp"#,##0';
+      const fill = (argb) => ({ type: "pattern", pattern: "solid", fgColor: { argb } });
+
+      // Urutkan: kategori → nama, agar terkelompok rapi dan mudah dibaca pelanggan.
+      // Barang tanpa kategori didorong ke paling akhir (sentinel) — bukan ke atas.
+      const catKey = (p) => (p.category && p.category.trim()) ? p.category : "\uFFFF";
+      const rows = [...list].sort((a, b) =>
+        catKey(a).localeCompare(catKey(b), "id") ||
+        (a.name || "").localeCompare(b.name || "", "id")
+      );
+      const withCarton = rows.some((p) => hasCarton(p)); // kolom karton hanya bila dipakai
+
+      // Status versi PELANGGAN (bukan istilah re-stok internal "Kritis/Re-stok")
+      const custStatus = (p) => {
+        const s = Number(p.stock) || 0;
+        if (s <= 0) return { label: "Habis", color: C.coral, bg: C.habisBg };
+        if (s <= (Number(p.safetyStock) || 0)) return { label: "Menipis", color: C.amber, bg: null };
+        return { label: "Tersedia", color: C.teal, bg: null };
+      };
+
+      // Definisi kolom (karton opsional)
+      const cols = [
+        { h: "No", w: 5, a: "center" },
+        { h: "Barang", w: 34, a: "left" },
+        { h: "Kategori", w: 18, a: "left" },
+        { h: "Satuan", w: 11, a: "center" },
+        { h: "Stok", w: 10, a: "right" },
+        { h: "Status", w: 13, a: "center" },
+        { h: withCarton ? "Harga / satuan" : "Harga", w: 16, a: "right" },
+      ];
+      if (withCarton) {
+        cols.push({ h: "Isi / karton", w: 12, a: "right" });
+        cols.push({ h: "Harga / karton", w: 16, a: "right" });
+      }
+      const nCols = cols.length;
+      const HEAD = 5; // baris header tabel (1-2 banner, 3 tanggal, 4 ruang lingkup, 5 header)
+
+      const ws = wb.addWorksheet("Stok & Harga", {
+        // Bekukan banner + header agar tetap terlihat saat menggulir daftar panjang
+        views: [{ showGridLines: false, state: "frozen", ySplit: HEAD }],
+      });
+      ws.columns = cols.map((c) => ({ width: c.w }));
+
+      // ---------- Banner (logo + nama toko) ----------
+      let imgId = null;
+      try { imgId = wb.addImage({ base64: LOGO.split(",")[1], extension: "jpeg" }); } catch (e) {}
+      ws.mergeCells(1, 1, 2, nCols);
+      const t = ws.getCell(1, 1);
+      t.value = { richText: [
+        { text: "CONFLUX ", font: { bold: true, size: 18, color: { argb: C.coral }, name: "Arial" } },
+        { text: "COFFEE CLUB", font: { bold: true, size: 18, color: { argb: C.cream }, name: "Arial" } },
+      ] };
+      t.alignment = { vertical: "middle", horizontal: "left", indent: imgId != null ? 6 : 1 };
+
+      const now = new Date();
+      const tgl = now.toLocaleDateString("id-ID", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+      const jam = now.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+      ws.mergeCells(3, 1, 3, nCols);
+      const sub = ws.getCell(3, 1);
+      sub.value = `Daftar Stok & Harga  ·  Berlaku per ${tgl}, pukul ${jam}`;
+      sub.font = { italic: true, size: 11, color: { argb: C.cream }, name: "Arial" };
+      sub.alignment = { vertical: "middle", horizontal: "left", indent: 1 };
+
+      for (let rr = 1; rr <= 2; rr++) for (let cc = 1; cc <= nCols; cc++) ws.getCell(rr, cc).fill = fill(C.dark);
+      for (let cc = 1; cc <= nCols; cc++) ws.getCell(3, cc).fill = fill(C.surface);
+      ws.getRow(1).height = 20; ws.getRow(2).height = 20; ws.getRow(3).height = 18;
+      if (imgId != null) ws.addImage(imgId, { tl: { col: 0.15, row: 0.2 }, ext: { width: 46, height: 46 } });
+
+      // ---------- Baris ruang lingkup (agar tidak salah kirim data) ----------
+      const scope = [];
+      scope.push(filter === "all" ? "Semua kategori" : (filter === "__titipan" ? "Barang titipan" : `Kategori: ${filter}`));
+      if (q.trim()) scope.push(`Pencarian: "${q.trim()}"`);
+      scope.push(`${rows.length} barang`);
+      ws.mergeCells(4, 1, 4, nCols);
+      const sc = ws.getCell(4, 1);
+      sc.value = scope.join("   ·   ");
+      sc.fill = fill(C.teal);
+      sc.font = { bold: true, size: 11, color: { argb: "FFFFFFFF" }, name: "Arial" };
+      sc.alignment = { vertical: "middle", horizontal: "left", indent: 1 };
+      ws.getRow(4).height = 20;
+
+      // ---------- Header tabel ----------
+      cols.forEach((cc, i) => {
+        const c = ws.getCell(HEAD, i + 1);
+        c.value = cc.h;
+        c.fill = fill(C.surface);
+        c.font = { bold: true, size: 11, color: { argb: C.cream }, name: "Arial" };
+        c.alignment = { vertical: "middle", horizontal: cc.a };
+        c.border = { bottom: { style: "thin", color: { argb: C.coral } } };
+      });
+      ws.getRow(HEAD).height = 22;
+
+      // ---------- Baris data ----------
+      let r = HEAD + 1;
+      rows.forEach((p, idx) => {
+        const st = custStatus(p);
+        const baseFill = st.bg || (idx % 2 ? C.rowB : C.rowA);
+        const carton = hasCarton(p);
+        const cells = [
+          { v: idx + 1, a: "center" },
+          { v: p.name || "—", a: "left", b: true },
+          { v: p.category || "—", a: "left" },
+          { v: p.unit || "—", a: "center" },
+          { v: Number(p.stock) || 0, a: "right", stockCell: true },
+          { v: st.label, a: "center", statusCell: true },
+          { v: Number(p.price) || 0, a: "right", fmt: money, b: true },
+        ];
+        if (withCarton) {
+          cells.push({ v: carton ? Number(p.cartonSize) : "—", a: "right" });
+          cells.push({ v: carton ? Number(p.priceCarton) : "—", a: "right", fmt: carton ? money : undefined });
+        }
+        cells.forEach((cc, i) => {
+          const c = ws.getCell(r, i + 1);
+          c.value = cc.v;
+          c.fill = fill(baseFill);
+          let color = C.ink, bold = !!cc.b;
+          if (cc.statusCell) { color = st.color; bold = true; }              // Status: warna sesuai kondisi
+          if (cc.stockCell && st.label !== "Tersedia") { color = st.color; bold = true; } // Stok menonjol saat menipis/habis
+          c.font = { size: 11, color: { argb: color }, name: "Arial", bold };
+          c.alignment = { vertical: "middle", horizontal: cc.a };
+          if (cc.fmt) c.numFmt = cc.fmt;
+          c.border = { bottom: { style: "hair", color: { argb: C.hairline } } };
+        });
+        ws.getRow(r).height = 19;
+        r++;
+      });
+
+      // ---------- Footer: total + keterangan ----------
+      r++;
+      ws.mergeCells(r, 1, r, nCols);
+      const foot = ws.getCell(r, 1);
+      foot.value = `Total ${rows.length} barang  ·  Dibuat ${tgl}, pukul ${jam}  ·  Harga sewaktu-waktu dapat berubah`;
+      foot.fill = fill(C.dark);
+      foot.font = { bold: true, size: 10, color: { argb: C.cream }, name: "Arial" };
+      foot.alignment = { vertical: "middle", horizontal: "left", indent: 1 };
+      ws.getRow(r).height = 20;
+      r += 2;
+      ws.mergeCells(r, 1, r, nCols);
+      const legend = ws.getCell(r, 1);
+      legend.value = "Keterangan:  Tersedia = stok siap   ·   Menipis = stok terbatas, segera pesan   ·   Habis = stok kosong";
+      legend.font = { italic: true, size: 10, color: { argb: C.ink }, name: "Arial" };
+      legend.alignment = { vertical: "middle", horizontal: "left", indent: 1 };
+
+      // ---------- Unduh ----------
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      const a = document.createElement("a");
+      a.href = url; a.download = `Stok-Harga-Conflux-${iso}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      onFlash && onFlash(`Daftar stok & harga (${rows.length} barang) diunduh`);
+    } catch (err) {
+      onFlash && onFlash("Gagal membuat Excel — coba lagi");
+      console.error(err);
+    } finally {
+      setExportingXlsx(false);
+    }
+  };
+
   return (
     <div className="stack">
       <div className="toolbar">
@@ -2731,6 +2914,10 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
             </button>
           )}
         </div>
+        <button className="btn ghost" onClick={exportStokHarga} disabled={exportingXlsx || !list.length}
+          title="Unduh daftar stok & harga (Excel) untuk dikirim ke coffee shop">
+          <Download size={16} /> {exportingXlsx ? "Menyiapkan…" : "Export Stok & Harga"}
+        </button>
         <button className="btn" onClick={() => setFormFor({})}><Plus size={16} /> Tambah Barang</button>
       </div>
 
