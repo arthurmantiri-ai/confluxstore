@@ -341,10 +341,22 @@ const normPhone = (v) => {
   if (d.startsWith("620")) return "62" + d.slice(3);
   return d;
 };
-// Kunci identitas pelanggan: nomor telepon bila ada, kalau tidak nama+usaha.
-const custKey = (c) => normPhone(c?.phone) ||
-  `n:${String(c?.name || "").trim().toLowerCase()}|${String(c?.business || "").trim().toLowerCase()}`;
-const custLabel = (c) => (c?.business ? `${c.name} — ${c.business}` : (c?.name || "—"));
+// Kunci identitas pelanggan — URUTAN PERSIS SAMA dengan upsert_customer() di
+// database, supaya pengelompokan di layar = pengelompokan di server:
+//   1. Ada NAMA USAHA  -> itu identitasnya (siapa pun orang yang datang)
+//   2. Tanpa usaha     -> nomor telepon
+//   3. Tanpa keduanya  -> nama orang
+const custKey = (c) => {
+  const b = String(c?.business || "").trim().toLowerCase();
+  if (b) return `b:${b}`;
+  const p = normPhone(c?.phone);
+  if (p) return `p:${p}`;
+  return `n:${String(c?.name || "").trim().toLowerCase()}`;
+};
+// Untuk pelanggan usaha, NAMA USAHA yang ditonjolkan; nama orang jadi kontak.
+const custTitle = (c) => String(c?.business || "").trim() || String(c?.name || "").trim() || "—";
+const custSub = (c) => (String(c?.business || "").trim() ? String(c?.name || "").trim() : "");
+const custLabel = (c) => { const t = custTitle(c); const u = custSub(c); return u ? `${t} — ${u}` : t; };
 const isBiz = (c) => c?.kind === "bisnis" || !!String(c?.business || "").trim();
 
 // ===== Akuntansi =====
@@ -516,6 +528,8 @@ const escposReceipt = (store, d) => {
     if (d.business) s += "Usaha: " + d.business + "\n";
     if (d.phone) s += "Telp: " + d.phone + "\n";
   }
+  if (d.kind !== "hutang" && d.business) s += "Pelanggan: " + d.business + "\n";
+  if (d.pickedBy) s += "Diambil oleh: " + d.pickedBy + "\n";
   s += "-".repeat(W) + "\n";
   s += ESC + "a" + "\x01"; // center
   s += store.footer + "\n" + store.phone + "\n";
@@ -819,6 +833,8 @@ function Receipt({ store, data }) {
           {d.phone && <div className="r-row r-small"><span>Telp</span><span>{d.phone}</span></div>}
         </>
       )}
+      {d.kind !== "hutang" && d.business && <div className="r-row r-small"><span>Pelanggan</span><span>{d.business}</span></div>}
+      {d.pickedBy && <div className="r-row r-small"><span>Diambil oleh</span><span>{d.pickedBy}</span></div>}
       <div className="r-dash" />
       <div className="r-center r-foot">{store.footer}</div>
       <div className="r-center r-brand">CONFLUX COFFEE CLUB</div>
@@ -1556,14 +1572,14 @@ export default function App() {
         return i >= 0 ? cs.map((c, j) => (j === i ? merged : c)) : [merged, ...cs];
       });
       setCustVisits((vs) => [{
-        txnId: ctx.txnId, customerId: localId, amount,
+        txnId: ctx.txnId, customerId: localId, amount, pickedBy: cust.pickedBy || "",
         cashier: ctx.cashier || "", method: ctx.method || "", at: Date.now(),
       }, ...vs]);
       if (hasSupabase) {
         enqueueCustomer({
           txnId: ctx.txnId,
           name: cust.name || "", business: cust.business || "", phone: cust.phone || "",
-          kind: cust.kind || "individu",
+          kind: cust.kind || "individu", pickedBy: cust.pickedBy || "",
           amount, at: soldAt, cashier: ctx.cashier || null, method: ctx.method || null,
           attempts: 0,
         });
@@ -1971,6 +1987,7 @@ export default function App() {
       payments: meta.payments || null,   // net (jumlah = total) — sama seperti yang diarsip
       paidParts: meta.paidParts || null, // gross (yang diserahkan pelanggan) — untuk tampilan nota
       debtor: meta.debtor, business: meta.business, phone: meta.phone,
+      pickedBy: meta.customer?.pickedBy || "",   // siapa yang datang mengambil (pelanggan usaha)
       settled: method === "hutang" ? false : undefined, // nota hutang baru = stempel BELUM LUNAS
     };
   };
@@ -3665,16 +3682,28 @@ function Kasir({ products, customers = [], onCheckout }) {
   const [nBiz, setNBiz] = useState("");
   const [nPhone, setNPhone] = useState("");
   const [nKind, setNKind] = useState("individu");
+  // Untuk pelanggan USAHA: siapa yang datang mengambil hari ini. Tidak memecah
+  // data usaha — hanya jejak per transaksi.
+  const [pickedBy, setPickedBy] = useState("");
   const resetCust = () => {
-    setCust(null); setCustQ(""); setNewOpen(false);
+    setCust(null); setCustQ(""); setNewOpen(false); setPickedBy("");
     setNName(""); setNBiz(""); setNPhone(""); setNKind("individu");
   };
   // Pelanggan yang akan ikut tercatat pada transaksi ini (null = tanpa pelanggan)
-  const custPick = cust
+  const custPickRaw = cust
     ? { id: cust.id, name: cust.name, business: cust.business, phone: cust.phone, kind: cust.kind }
-    : (nName.trim() || normPhone(nPhone)
-        ? { id: null, name: nName.trim() || nPhone.trim(), business: nBiz.trim(), phone: nPhone.trim(), kind: nBiz.trim() ? "bisnis" : nKind }
+    : (nName.trim() || nBiz.trim() || normPhone(nPhone)
+        ? { id: null, name: nName.trim() || nBiz.trim() || nPhone.trim(), business: nBiz.trim(), phone: nPhone.trim(), kind: nBiz.trim() ? "bisnis" : nKind }
         : null);
+  const custIsBiz = !!custPickRaw && isBiz(custPickRaw);
+  const custPick = custPickRaw
+    ? { ...custPickRaw, pickedBy: custIsBiz ? pickedBy.trim() : "" }
+    : null;
+  // Nama usaha yang diketik ternyata SUDAH terdaftar -> jangan sampai riwayat
+  // usaha yang sama terpecah dua. Tawarkan memilih yang sudah ada.
+  const bizClash = (!cust && nBiz.trim())
+    ? customers.find((c) => String(c.business || "").trim().toLowerCase() === nBiz.trim().toLowerCase())
+    : null;
   // Pencarian pelanggan: nama, nama usaha, atau potongan nomor telepon
   const custHits = (() => {
     const term = custQ.trim().toLowerCase();
@@ -3906,11 +3935,11 @@ function Kasir({ products, customers = [], onCheckout }) {
 
             {cust ? (
               <div className="cust-chip">
-                <div className="cust-ava">{(cust.name || "?").trim().charAt(0).toUpperCase()}</div>
+                <div className="cust-ava">{custTitle(cust).charAt(0).toUpperCase()}</div>
                 <div className="cust-chip-info">
-                  <div className="cust-chip-name">{cust.name}</div>
+                  <div className="cust-chip-name">{custTitle(cust)}</div>
                   <div className="muted xs">
-                    {cust.business || (isBiz(cust) ? "Bisnis" : "Individu")}{cust.phone ? ` · ${cust.phone}` : ""}
+                    {custSub(cust) || (isBiz(cust) ? "Bisnis" : "Individu")}{cust.phone ? ` · ${cust.phone}` : ""}
                   </div>
                 </div>
                 {(cust.txnCount || 0) > 0 && (
@@ -3936,10 +3965,10 @@ function Kasir({ products, customers = [], onCheckout }) {
                     <div className="cust-hits">
                       {custHits.map((c) => (
                         <button key={c.id} className="cust-hit" onClick={() => { setCust(c); setNewOpen(false); setCustQ(""); }}>
-                          <div className="cust-ava sm">{(c.name || "?").trim().charAt(0).toUpperCase()}</div>
+                          <div className="cust-ava sm">{custTitle(c).charAt(0).toUpperCase()}</div>
                           <div className="cust-hit-info">
-                            <div className="cust-hit-name">{c.name}</div>
-                            <div className="muted xs">{c.business || (isBiz(c) ? "Bisnis" : "Individu")}{c.phone ? ` · ${c.phone}` : ""}</div>
+                            <div className="cust-hit-name">{custTitle(c)}</div>
+                            <div className="muted xs">{custSub(c) || (isBiz(c) ? "Bisnis" : "Individu")}{c.phone ? ` · ${c.phone}` : ""}</div>
                           </div>
                           {(c.txnCount || 0) > 0 && <span className="cust-badge"><Repeat size={11} /> {num(c.txnCount)}×</span>}
                         </button>
@@ -3991,6 +4020,12 @@ function Kasir({ products, customers = [], onCheckout }) {
                       <Building2 size={15} />
                       <input className="pay-input" placeholder="Nama usaha / warung (opsional)" value={nBiz} onChange={(e) => setNBiz(e.target.value)} />
                     </div>
+                    {bizClash && (
+                      <button type="button" className="cust-clash" onClick={() => { setCust(bizClash); setNewOpen(false); setNName(""); setNBiz(""); setNPhone(""); }}>
+                        <AlertTriangle size={13} />
+                        <span><b>{bizClash.business}</b> sudah terdaftar. Klik di sini untuk memakainya agar riwayat usahanya tidak terpecah.</span>
+                      </button>
+                    )}
                     <div className="pay-row">
                       <Phone size={15} />
                       <input className="pay-input" inputMode="tel" placeholder="No. WhatsApp (opsional)" value={nPhone} onChange={(e) => setNPhone(e.target.value)} />
@@ -3999,6 +4034,21 @@ function Kasir({ products, customers = [], onCheckout }) {
                   </div>
                 )}
               </>
+            )}
+
+            {/* Pelanggan USAHA: catat siapa yang datang mengambil hari ini.
+                Datanya menempel di transaksi, BUKAN memecah data usahanya —
+                jadi satu warung tetap satu baris di Data Customer. */}
+            {custIsBiz && (
+              <div className="pay-row">
+                <User size={15} />
+                <input
+                  className="pay-input"
+                  placeholder="Diambil / dipesan oleh (opsional)"
+                  value={pickedBy}
+                  onChange={(e) => setPickedBy(e.target.value)}
+                />
+              </div>
             )}
           </div>
 
@@ -4709,7 +4759,7 @@ const WA_TPL = [
 ];
 const buildWaText = (tpl, c, ctx) => {
   const toko = ctx.storeName || "Conflux Coffee Club";
-  const sapaan = c.business ? `Halo ${c.business}` : `Halo Kak ${c.name}`;
+  const sapaan = String(c.business || "").trim() ? `Halo ${c.business}` : `Halo Kak ${c.name}`;
   if (tpl === "promo") {
     return `${sapaan}, ini ${toko} 👋\n\nAda promo untuk minggu ini:\n• (tulis promo di sini)\n\nKalau berminat balas chat ini ya, stok terbatas. Terima kasih!`;
   }
@@ -4862,7 +4912,7 @@ function CustomersView({
       .filter((c) => (c.totalSpent || 0) > 0)
       .sort((a, b) => (b.totalSpent || 0) - (a.totalSpent || 0))
       .slice(0, 10)
-      .map((c) => ({ d: (c.business || c.name || "—").slice(0, 16), v: c.totalSpent || 0, id: c.id })),
+      .map((c) => ({ d: custTitle(c).slice(0, 16), v: c.totalSpent || 0, id: c.id })),
     [customers]);
 
   // ===== Tabel =====
@@ -4896,7 +4946,7 @@ function CustomersView({
 
   // ===== Aksi =====
   const openWa = (c, tpl) => {
-    if (!normPhone(c.phone)) { flash && flash(`${c.name} belum punya nomor telepon — lengkapi dulu lewat tombol Ubah.`); return; }
+    if (!normPhone(c.phone)) { flash && flash(`${custTitle(c)} belum punya nomor telepon — lengkapi dulu lewat tombol Ubah.`); return; }
     setWa({ c, tpl, text: buildWaText(tpl, c, { storeName: store?.name, products, unpaid: unpaidOf(c) }) });
   };
   const submitEdit = async () => {
@@ -4932,7 +4982,7 @@ function CustomersView({
       const row = await onMerge(mergeFor.id, drop.id);
       setMergeFor(null); setMergeQ("");
       if (row) setDetail(row);
-      flash && flash(`${drop.name} digabung ke ${mergeFor.name}`);
+      flash && flash(`${custTitle(drop)} digabung ke ${custTitle(mergeFor)}`);
     } catch (e) { flash && flash(e?.message || "Gagal menggabungkan"); }
     finally { setBusy(false); }
   };
@@ -4954,7 +5004,7 @@ function CustomersView({
       const fill = (argb) => ({ type: "pattern", pattern: "solid", fgColor: { argb } });
       const ws = wb.addWorksheet("Data Pelanggan", { views: [{ state: "frozen", ySplit: 5 }] });
       const cols = [
-        { h: "No", w: 5 }, { h: "Nama", w: 26 }, { h: "Usaha", w: 24 }, { h: "Jenis", w: 11 },
+        { h: "No", w: 5 }, { h: "Pelanggan", w: 28 }, { h: "Kontak", w: 22 }, { h: "Jenis", w: 11 },
         { h: "No. WhatsApp", w: 18 }, { h: "Transaksi", w: 11 }, { h: "Total belanja", w: 16 },
         { h: "Rata-rata / transaksi", w: 20 }, { h: "Pertama", w: 14 }, { h: "Terakhir", w: 14 },
         { h: "Hutang belum lunas", w: 19 }, { h: "Catatan", w: 30 },
@@ -4985,7 +5035,7 @@ function CustomersView({
         const r = 6 + i;
         const u = unpaidOf(c);
         const vals = [
-          i + 1, c.name || "—", c.business || "—", isBiz(c) ? "Bisnis" : "Individu",
+          i + 1, custTitle(c), custSub(c) || "—", isBiz(c) ? "Bisnis" : "Individu",
           normPhone(c.phone) ? "+" + normPhone(c.phone) : "—",
           c.txnCount || 0, c.totalSpent || 0, (c.txnCount ? (c.totalSpent || 0) / c.txnCount : 0),
           fmtDay(c.firstTxnAt), fmtDay(c.lastTxnAt), u ? u.total : 0, c.note || "",
@@ -5200,10 +5250,10 @@ function CustomersView({
                     <tr key={c.id}>
                       <td>
                         <button className="cust-name-btn" onClick={() => setDetail(c)}>
-                          <div className="cust-ava sm">{(c.name || "?").trim().charAt(0).toUpperCase()}</div>
+                          <div className="cust-ava sm">{custTitle(c).charAt(0).toUpperCase()}</div>
                           <div>
-                            <div className="cust-name">{c.name || "—"}</div>
-                            {c.business && <div className="muted xs">{c.business}</div>}
+                            <div className="cust-name">{custTitle(c)}</div>
+                            {custSub(c) && <div className="muted xs">Kontak: {custSub(c)}</div>}
                           </div>
                         </button>
                       </td>
@@ -5282,11 +5332,11 @@ function CustomersView({
           return (
             <div className="stack-sm">
               <div className="cust-detail-head">
-                <div className="cust-ava big">{(detail.name || "?").trim().charAt(0).toUpperCase()}</div>
+                <div className="cust-ava big">{custTitle(detail).charAt(0).toUpperCase()}</div>
                 <div>
-                  <div className="cust-detail-name">{detail.name}</div>
+                  <div className="cust-detail-name">{custTitle(detail)}</div>
                   <div className="muted xs">
-                    {detail.business || (isBiz(detail) ? "Bisnis" : "Individu")}
+                    {isBiz(detail) ? `Bisnis${custSub(detail) ? ` · kontak ${custSub(detail)}` : ""}` : "Individu"}
                     {detail.phone ? ` · ${detail.phone}` : " · belum ada nomor telepon"}
                   </div>
                   {detail.note && <div className="muted xs cust-note">{detail.note}</div>}
@@ -5334,6 +5384,7 @@ function CustomersView({
                           {PAY_LABEL[v.method] || v.method || "—"}{v.cashier ? ` · ${v.cashier}` : ""}
                           {items.length > 0 && ` · ${items.map((i) => `${i.qtyLabel || num(i.qty)}`).join(", ")}`}
                         </div>
+                        {v.pickedBy && <div className="cust-picked"><User size={11} /> Diambil oleh {v.pickedBy}</div>}
                       </div>
                       <div className="tab strong">{rp(v.amount)}</div>
                     </div>
@@ -5381,7 +5432,10 @@ function CustomersView({
               <input value={editing.note} placeholder="cth. Ambil sendiri tiap Sabtu"
                 onChange={(e) => setEditing((x) => ({ ...x, note: e.target.value }))} /></label>
             <div className="muted xs">
-              Pelanggan dengan nomor telepon yang sama otomatis digabung — jadi tidak akan ada data ganda.
+              Untuk pelanggan <b>bisnis</b>, nama usaha adalah identitasnya: satu warung/cafe tetap
+              satu baris walau yang datang mengambil orang yang berbeda-beda. Nama di atas dipakai
+              sebagai kontak utama. Untuk pelanggan <b>perorangan</b>, nomor telepon yang jadi patokan
+              supaya tidak ada data ganda.
             </div>
             {saveErr && <div className="pin-err">{saveErr}</div>}
           </div>
@@ -5393,7 +5447,7 @@ function CustomersView({
         open={!!wa}
         onClose={() => setWa(null)}
         width={520}
-        title={wa ? `Kirim WhatsApp ke ${wa.c.name}` : ""}
+        title={wa ? `Kirim WhatsApp ke ${custTitle(wa.c)}` : ""}
         footer={wa && (
           <>
             <button className="btn ghost" onClick={() => setWa(null)}>Batal</button>
@@ -5427,14 +5481,14 @@ function CustomersView({
         open={!!mergeFor}
         onClose={() => { setMergeFor(null); setMergeQ(""); }}
         width={520}
-        title={mergeFor ? `Gabungkan ke ${mergeFor.name}` : ""}
+        title={mergeFor ? `Gabungkan ke ${custTitle(mergeFor)}` : ""}
         footer={<button className="btn ghost" onClick={() => { setMergeFor(null); setMergeQ(""); }}>Tutup</button>}
       >
         {mergeFor && (
           <div className="stack-sm">
             <div className="pay-note warn">
               Pilih data pelanggan yang sebenarnya <b>orang yang sama</b>. Seluruh riwayat belanjanya
-              akan dipindahkan ke <b>{mergeFor.name}</b>, lalu data ganda dihapus. Tindakan ini permanen.
+              akan dipindahkan ke <b>{custTitle(mergeFor)}</b>, lalu data ganda dihapus. Tindakan ini permanen.
             </div>
             <div className="search sm">
               <Search size={15} />
@@ -5451,10 +5505,10 @@ function CustomersView({
                 .slice(0, 8)
                 .map((c) => (
                   <button key={c.id} className="cust-hit" disabled={busy} onClick={() => submitMerge(c)}>
-                    <div className="cust-ava sm">{(c.name || "?").trim().charAt(0).toUpperCase()}</div>
+                    <div className="cust-ava sm">{custTitle(c).charAt(0).toUpperCase()}</div>
                     <div className="cust-hit-info">
-                      <div className="cust-hit-name">{c.name}</div>
-                      <div className="muted xs">{c.business || (isBiz(c) ? "Bisnis" : "Individu")}{c.phone ? ` · ${c.phone}` : ""} · {num(c.txnCount || 0)}× · {rp(c.totalSpent || 0)}</div>
+                      <div className="cust-hit-name">{custTitle(c)}</div>
+                      <div className="muted xs">{custSub(c) || (isBiz(c) ? "Bisnis" : "Individu")}{c.phone ? ` · ${c.phone}` : ""} · {num(c.txnCount || 0)}× · {rp(c.totalSpent || 0)}</div>
                     </div>
                     <Merge size={14} className="muted" />
                   </button>
@@ -8084,6 +8138,13 @@ function Style() {
       .cust-kind-btn.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
       .cust-new-close{flex:0 0 auto}
 
+      .cust-clash{display:flex;align-items:flex-start;gap:7px;width:100%;text-align:left;border:1px solid var(--warn);
+        background:var(--warn-bg);border-radius:var(--r-xs);padding:8px 10px;font:inherit;font-size:11.5px;
+        line-height:1.45;color:var(--warn);cursor:pointer}
+      .cust-clash:hover{background:rgba(224,165,60,.26)}
+      .cust-clash svg{flex:0 0 auto;margin-top:1px}
+      .cust-picked{display:inline-flex;align-items:center;gap:4px;margin-top:3px;font-size:11px;font-weight:600;
+        color:var(--teal)}
       /* -- tab Data Customer -- */
       .cust-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
       .cust-pending{font-size:11.5px;font-weight:600;color:var(--warn);background:var(--warn-bg);

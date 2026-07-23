@@ -577,6 +577,7 @@ const rowToVisit = (r) => ({
   amount: Number(r.amount || 0),
   cashier: r.cashier || "",
   method: r.method || "",
+  pickedBy: r.picked_by || "",   // siapa yang datang mengambil (pelanggan usaha)
   at: r.at ? Date.parse(r.at) : null,
 });
 export const Customers = {
@@ -598,7 +599,7 @@ export const Customers = {
     return (data || []).map(rowToVisit);
   },
   // Catat "pelanggan X bertransaksi di nota Y". Atomik + idempoten di server.
-  // p = { txnId, name, business, phone, kind, amount, at(ISO), cashier, method }
+  // p = { txnId, name, business, phone, kind, amount, at(ISO), cashier, method, pickedBy }
   async link(p) {
     const { data, error } = await supabase.rpc("link_customer_txn", {
       p_txn_id: p.txnId,
@@ -610,6 +611,7 @@ export const Customers = {
       p_at: p.at || null,
       p_cashier: p.cashier || null,
       p_method: p.method || null,
+      p_picked_by: p.pickedBy || null,
     });
     if (error) throw error;
     const c = data?.customer;
