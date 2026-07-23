@@ -552,6 +552,94 @@ export const Consign = {
   },
 };
 
+/* ============================ PELANGGAN (CRM) ============================
+   Master pelanggan + buku kunjungan (satu baris per transaksi).
+   Semua PENULISAN lewat RPC security definer — baris tidak bisa diubah
+   langsung dari klien. link() idempoten pada txn_id, jadi antrean offline
+   boleh mengirim ulang tanpa menggandakan statistik.                     */
+const rowToCustomer = (r) => ({
+  id: r.id,
+  name: r.name || "",
+  business: r.business || "",
+  phone: r.phone || "",
+  phoneNorm: r.phone_norm || "",
+  kind: r.kind === "bisnis" ? "bisnis" : "individu",
+  note: r.note || "",
+  txnCount: Number(r.txn_count || 0),
+  totalSpent: Number(r.total_spent || 0),
+  firstTxnAt: r.first_txn_at ? Date.parse(r.first_txn_at) : null,
+  lastTxnAt: r.last_txn_at ? Date.parse(r.last_txn_at) : null,
+  ts: r.created_at ? Date.parse(r.created_at) : null,
+});
+const rowToVisit = (r) => ({
+  txnId: r.txn_id,
+  customerId: r.customer_id,
+  amount: Number(r.amount || 0),
+  cashier: r.cashier || "",
+  method: r.method || "",
+  at: r.at ? Date.parse(r.at) : null,
+});
+export const Customers = {
+  async list() {
+    const { data, error } = await supabase
+      .from("customers").select("*")
+      .order("last_txn_at", { ascending: false, nullsFirst: false });
+    if (error) throw error;
+    return (data || []).map(rowToCustomer);
+  },
+  // Buku kunjungan untuk grafik & riwayat. Dibatasi agar tetap ringan
+  // walau data sudah bertahun-tahun (grafik hanya butuh yang terbaru).
+  async visits(opts = {}) {
+    let q = supabase.from("customer_txns").select("*").order("at", { ascending: false });
+    if (opts.sinceDays) q = q.gte("at", new Date(Date.now() - opts.sinceDays * 86400000).toISOString());
+    q = q.limit(opts.limit || 5000);
+    const { data, error } = await q;
+    if (error) throw error;
+    return (data || []).map(rowToVisit);
+  },
+  // Catat "pelanggan X bertransaksi di nota Y". Atomik + idempoten di server.
+  // p = { txnId, name, business, phone, kind, amount, at(ISO), cashier, method }
+  async link(p) {
+    const { data, error } = await supabase.rpc("link_customer_txn", {
+      p_txn_id: p.txnId,
+      p_name: p.name || "",
+      p_business: p.business || "",
+      p_phone: p.phone || "",
+      p_kind: p.kind || "individu",
+      p_amount: Number(p.amount) || 0,
+      p_at: p.at || null,
+      p_cashier: p.cashier || null,
+      p_method: p.method || null,
+    });
+    if (error) throw error;
+    const c = data?.customer;
+    return { status: data?.status || "ok", customer: c ? rowToCustomer(c) : null };
+  },
+  // Tambah (id null) / ubah data pelanggan dari tab Data Customer
+  async save(p) {
+    const { data, error } = await supabase.rpc("customer_save", {
+      p_id: p.id || null,
+      p_name: p.name || "",
+      p_business: p.business || "",
+      p_phone: p.phone || "",
+      p_kind: p.kind || "individu",
+      p_note: p.note || "",
+    });
+    if (error) throw error;
+    return data ? rowToCustomer(data) : null;
+  },
+  // Satukan dua data pelanggan yang ternyata orang yang sama (manajer)
+  async merge(keepId, dropId) {
+    const { data, error } = await supabase.rpc("customer_merge", { p_keep: keepId, p_drop: dropId });
+    if (error) throw error;
+    return data ? rowToCustomer(data) : null;
+  },
+  async remove(id) {
+    const { error } = await supabase.rpc("customer_delete", { p_id: id });
+    if (error) throw error;
+  },
+};
+
 /* ============================ SETTINGS ============================ */
 export const Settings = {
   async get() { const { data, error } = await supabase.from("settings").select("data").eq("id", 1).single(); if (error) throw error; return data.data; },
