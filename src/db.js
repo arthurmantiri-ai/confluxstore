@@ -643,9 +643,27 @@ export const Customers = {
 };
 
 /* ============================ SETTINGS ============================ */
+// Pengaturan sistem: SATU baris (id = 1) berisi jsonb. Boleh dibaca semua akun
+// yang sudah login (kasir butuh nama toko & aturan kasir), tapi hanya MANAJER
+// yang boleh menulis — dijaga di database lewat RPC settings_save, bukan cuma
+// disembunyikan tombolnya di layar.
 export const Settings = {
-  async get() { const { data, error } = await supabase.from("settings").select("data").eq("id", 1).single(); if (error) throw error; return data.data; },
-  async save(obj) { const { error } = await supabase.from("settings").upsert({ id: 1, data: obj }); if (error) throw error; },
+  async get() {
+    const { data, error } = await supabase.from("settings").select("data").eq("id", 1).single();
+    if (error) throw error;
+    return data.data;
+  },
+  async save(obj) {
+    const { error } = await supabase.rpc("settings_save", { p_data: obj });
+    if (!error) return;
+    // Migrasi SQL belum dijalankan (fungsi belum ada) -> pakai cara lama supaya
+    // aplikasi tidak macet. Penolakan izin TIDAK ikut jalur ini: kalau manajer
+    // memang bukan manajer, galatnya harus sampai ke layar apa adanya.
+    const missing = error.code === "42883" || /settings_save/i.test(error.message || "");
+    if (!missing) throw error;
+    const { error: e2 } = await supabase.from("settings").upsert({ id: 1, data: obj });
+    if (e2) throw e2;
+  },
 };
 
 /* ============================ AUTH / PROFILES ============================ */

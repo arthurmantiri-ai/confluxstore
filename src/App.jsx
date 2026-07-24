@@ -9,7 +9,7 @@ import {
   Banknote, Landmark, QrCode, CreditCard, Clock,
   Lock, Unlock, ShieldCheck, Calculator, ArrowRight,
   Phone, Building2, User, CheckCircle2, Printer, Settings, LogOut,
-  LineChart, BarChart3, Coins, Hammer, Download, Calendar,
+  LineChart, BarChart3, Coins, Hammer, Download, Upload, Calendar,
   Bean, Droplets, CupSoda, Coffee, LayoutGrid, History, Bluetooth, Handshake,
   Undo2, ArrowLeftRight, PackageX,
   Users, UserPlus, MessageCircle, Repeat, Merge, Crown, Filter, ExternalLink, Send
@@ -29,6 +29,256 @@ const rp = (n) => "Rp" + new Intl.NumberFormat("id-ID").format(Math.round(n || 0
 const num = (n) => new Intl.NumberFormat("id-ID").format(Math.round(n || 0));
 const uid = () => Math.random().toString(36).slice(2, 9);
 
+/* =====================================================================
+   PENGATURAN SISTEM — satu-satunya tempat angka & daftar bawaan
+
+   Dulu nilai seperti "ambang kedaluwarsa 30 hari", "siklus order 7 hari",
+   atau daftar kategori biaya ditulis langsung di dalam kode, sehingga tiap
+   perubahan kecil harus lewat upload ulang. Sekarang semuanya jadi NILAI
+   BAWAAN saja: nilai yang benar-benar dipakai dibaca dari tabel `settings`
+   (satu baris, kolom jsonb) dan bisa diubah lewat menu Pengaturan.
+
+   Alur data:
+     tabel settings  ->  state `store` di App  ->  cermin CFG (di bawah)
+
+   CFG dibutuhkan karena banyak fungsi util tingkat modul (expiryStatus,
+   targetLevel, invoiceNo, ...) dipanggil dari puluhan tempat yang TIDAK
+   menerima prop. Mengoper pengaturan ke seluruh pohon komponen berisiko
+   ada yang terlewat; cermin modul memastikan semuanya membaca nilai yang
+   sama persis.
+
+   ATURAN KETAT:
+   1. Semua pembacaan lewat helper cfgX() — tidak pernah menyentuh CFG
+      langsung — supaya baris settings lama/tidak lengkap tetap aman.
+   2. normStore() SELALU dipanggil sebelum nilai dipakai/disimpan, jadi
+      angka di luar akal (0, minus, teks) dijepit ke rentang yang sah.
+      Tidak ada jalan bagi salah ketik di layar Pengaturan untuk membuat
+      NaN merembes ke perhitungan stok atau uang.
+   ===================================================================== */
+const DEFAULT_STORE = {
+  ver: 2,
+  // — Identitas toko: kepala nota, pesan WhatsApp, judul export —
+  name: "Conflux Coffee Club",
+  addr1: "Tomohon · Manado, Sulawesi Utara",
+  addr2: "Brewing Connection, One Cup at a Time",
+  phone: "@conflux.coffee",
+  footer: "Terima kasih sudah berbelanja!",
+  pin: "1234",        // PIN mode manajer (hanya dipakai saat tanpa server)
+  paper: 58,          // 58 atau 80 mm
+  method: "browser",  // "browser" | "bluetooth" | "serial"
+  // — Nota —
+  nota: {
+    invPrefix: "INV",              // awalan nomor nota penjualan
+    brand: "CONFLUX COFFEE CLUB",  // baris merek di kaki nota
+    logo: true,                    // tampilkan logo di kepala nota
+    showCashier: true,             // tampilkan baris "Kasir"
+    note: "",                      // catatan kaki tambahan (syarat retur dll.)
+    autoPreview: true,             // buka pratinjau nota otomatis usai transaksi
+  },
+  // — Stok & re-stok —
+  stok: {
+    expiryWarnDays: 30,   // ambang "dekat kedaluwarsa" (hari)
+    reviewDays: 7,        // siklus order untuk saran jumlah re-stok
+    lowStockAlert: true,  // lonceng "perlu re-stok" di bilah atas
+    newDailyUsage: 1,     // bawaan barang baru
+    newLeadTime: 1,
+    newSafetyStock: 0,
+    newUnit: "pcs",
+    units: ["pcs", "botol", "kg", "pack", "sachet", "box"],
+  },
+  // — Kasir —
+  kasir: {
+    methods: ["cash", "transfer", "qris", "card", "hutang", "split"],
+    defaultMethod: "cash",
+    quickCash: [50000, 100000],  // pembulatan tombol uang cepat
+    requirePaid: false,          // tunai: wajib isi uang diterima
+    requireCustomer: false,      // wajib pilih/isi pelanggan tiap transaksi
+  },
+  // — Pelanggan (CRM) —
+  crm: {
+    pasifDays: 45,   // batas "pelanggan pasif"
+    newDays: 30,     // rentang saringan "pelanggan baru"
+    waStokMax: 25,   // maksimal baris pada pesan WA "list stok & harga"
+    wa: { sapa: "", promo: "", stok: "", hutang: "" }, // "" = pakai teks bawaan
+  },
+  // — Akuntansi —
+  akun: {
+    expenseCats: ["Sewa", "Gaji", "Utilitas", "Marketing", "Operasional", "Lain-lain"],
+    accounts: [],  // daftar rekening tujuan setoran kas
+  },
+  // — Shift kasir —
+  shift: {
+    cashTolerance: 0,  // selisih kas (Rp) yang masih dianggap wajar
+  },
+  // — Sistem —
+  sistem: {
+    refreshSec: 120,  // tarik ulang data berkala (detik)
+    salesDays: 90,    // rentang riwayat penjualan yang dimuat saat buka aplikasi
+  },
+};
+
+// Bagian bersarang satu tingkat. Dipisah agar penggabungan tidak "menelan"
+// kunci baru saat baris settings di server masih versi lama.
+const CFG_SECTIONS = ["nota", "stok", "kasir", "crm", "akun", "shift", "sistem"];
+
+// Jepit angka ke rentang sah. Teks/kosong/NaN -> nilai bawaan (bukan 0),
+// karena 0 pada "siklus order" atau "ambang kedaluwarsa" akan diam-diam
+// merusak saran re-stok dan peringatan kedaluwarsa.
+const clampInt = (v, lo, hi, fb) => {
+  // Kosong / null / undefined = "tidak diisi" -> pakai bawaan. Ini BUKAN sama
+  // dengan angka 0: Number(null) dan Number("") keduanya 0, sehingga tanpa
+  // penjagaan ini kolom yang dikosongkan akan berubah jadi batas bawah
+  // (mis. "siklus order" jadi 1 hari) tanpa disadari.
+  if (v === null || v === undefined || (typeof v === "string" && v.trim() === "")) return fb;
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return fb;
+  return Math.min(hi, Math.max(lo, n));
+};
+// Daftar teks: buang yang kosong/duplikat, rapikan spasi, batasi panjang.
+const cleanList = (v, fb, max = 40) => {
+  if (!Array.isArray(v)) return [...fb];
+  const out = [];
+  v.forEach((x) => {
+    const s = String(x == null ? "" : x).trim().slice(0, 60);
+    if (s && !out.includes(s)) out.push(s);
+  });
+  return out.slice(0, max);
+};
+const cleanText = (v, fb, max = 200) => {
+  const s = v == null ? "" : String(v);
+  return s.trim() ? s.slice(0, max) : fb;
+};
+
+// Gabungkan pengaturan server dengan bawaan, lalu sahkan setiap nilainya.
+// Fungsi ini adalah SATU-SATUNYA pintu masuk: dipakai saat memuat dari server,
+// saat menyimpan, dan saat menyetel cermin CFG.
+const normStore = (raw) => {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const o = { ...DEFAULT_STORE, ...src };
+  CFG_SECTIONS.forEach((k) => {
+    const s = src[k];
+    o[k] = { ...DEFAULT_STORE[k], ...(s && typeof s === "object" && !Array.isArray(s) ? s : {}) };
+  });
+
+  // — identitas —
+  o.name = cleanText(o.name, DEFAULT_STORE.name, 60);
+  o.addr1 = String(o.addr1 == null ? "" : o.addr1).slice(0, 90);
+  o.addr2 = String(o.addr2 == null ? "" : o.addr2).slice(0, 90);
+  o.phone = String(o.phone == null ? "" : o.phone).slice(0, 60);
+  o.footer = String(o.footer == null ? "" : o.footer).slice(0, 90);
+  o.pin = String(o.pin == null ? "" : o.pin).replace(/\D/g, "").slice(0, 8) || DEFAULT_STORE.pin;
+  o.paper = o.paper === 80 ? 80 : 58;
+  o.method = ["browser", "bluetooth", "serial"].includes(o.method) ? o.method : "browser";
+
+  // — nota —
+  // Awalan nota: huruf/angka saja. "RTR" DILARANG karena dipakai sistem untuk
+  // menandai baris retur (penjualan negatif) — memakainya akan membuat retur
+  // dan penjualan tertukar di Riwayat maupun laporan.
+  let pre = String(o.nota.invPrefix || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+  if (!pre || pre === "RTR") pre = "INV";
+  o.nota.invPrefix = pre;
+  o.nota.brand = String(o.nota.brand == null ? "" : o.nota.brand).slice(0, 60);
+  o.nota.note = String(o.nota.note == null ? "" : o.nota.note).slice(0, 240);
+  o.nota.logo = o.nota.logo !== false;
+  o.nota.showCashier = o.nota.showCashier !== false;
+  o.nota.autoPreview = o.nota.autoPreview !== false;
+
+  // — stok —
+  o.stok.expiryWarnDays = clampInt(o.stok.expiryWarnDays, 1, 365, 30);
+  o.stok.reviewDays = clampInt(o.stok.reviewDays, 1, 180, 7);
+  o.stok.newDailyUsage = clampInt(o.stok.newDailyUsage, 0, 100000, 1);
+  o.stok.newLeadTime = clampInt(o.stok.newLeadTime, 0, 365, 1);
+  o.stok.newSafetyStock = clampInt(o.stok.newSafetyStock, 0, 100000, 0);
+  o.stok.units = cleanList(o.stok.units, DEFAULT_STORE.stok.units, 24);
+  if (!o.stok.units.length) o.stok.units = [...DEFAULT_STORE.stok.units];
+  // Satuan bawaan WAJIB ada di daftar satuan, kalau tidak pilihan di layar
+  // Tambah Barang akan tampil kosong dan barang baru lahir tanpa satuan.
+  const nu = cleanText(o.stok.newUnit, o.stok.units[0], 20);
+  o.stok.newUnit = o.stok.units.includes(nu) ? nu : o.stok.units[0];
+  o.stok.lowStockAlert = o.stok.lowStockAlert !== false;
+
+  // — kasir —
+  const validPay = ["cash", "transfer", "qris", "card", "hutang", "split"];
+  let ms = Array.isArray(o.kasir.methods) ? o.kasir.methods.filter((m) => validPay.includes(m)) : [];
+  ms = validPay.filter((m) => ms.includes(m));           // urutan tetap konsisten
+  if (!ms.length) ms = [...DEFAULT_STORE.kasir.methods]; // jangan sampai kasir tak bisa menagih
+  if (!ms.includes("cash")) ms.unshift("cash");          // tunai selalu tersedia
+  // "Campur" hanya masuk akal bila ada >=2 metode non-hutang yang aktif
+  if (ms.includes("split") && ms.filter((m) => ["cash", "transfer", "qris", "card"].includes(m)).length < 2)
+    ms = ms.filter((m) => m !== "split");
+  o.kasir.methods = ms;
+  o.kasir.defaultMethod = ms.includes(o.kasir.defaultMethod) && o.kasir.defaultMethod !== "split"
+    ? o.kasir.defaultMethod : (ms.includes("cash") ? "cash" : ms[0]);
+  const qc = (Array.isArray(o.kasir.quickCash) ? o.kasir.quickCash : [])
+    .map((v) => {
+      const n = Math.round(Number(v));
+      // Nol, minus, dan teks BUKAN pecahan uang -> dibuang. Hanya angka yang
+      // sudah masuk akal yang dijepit ke rentang sah.
+      if (!Number.isFinite(n) || n <= 0) return 0;
+      return Math.min(10000000, Math.max(1000, n));
+    })
+    .filter((v) => v > 0);
+  o.kasir.quickCash = (qc.length ? Array.from(new Set(qc)) : [...DEFAULT_STORE.kasir.quickCash]).sort((a, b) => a - b).slice(0, 6);
+  o.kasir.requirePaid = o.kasir.requirePaid === true;
+  o.kasir.requireCustomer = o.kasir.requireCustomer === true;
+
+  // — pelanggan —
+  o.crm.pasifDays = clampInt(o.crm.pasifDays, 7, 730, 45);
+  o.crm.newDays = clampInt(o.crm.newDays, 1, 365, 30);
+  o.crm.waStokMax = clampInt(o.crm.waStokMax, 5, 100, 25);
+  const wsrc = o.crm.wa && typeof o.crm.wa === "object" ? o.crm.wa : {};
+  o.crm.wa = {
+    sapa: String(wsrc.sapa || "").slice(0, 1200),
+    promo: String(wsrc.promo || "").slice(0, 1200),
+    stok: String(wsrc.stok || "").slice(0, 1200),
+    hutang: String(wsrc.hutang || "").slice(0, 1200),
+  };
+
+  // — akuntansi —
+  o.akun.expenseCats = cleanList(o.akun.expenseCats, DEFAULT_STORE.akun.expenseCats, 24);
+  if (!o.akun.expenseCats.length) o.akun.expenseCats = [...DEFAULT_STORE.akun.expenseCats];
+  o.akun.accounts = cleanList(o.akun.accounts, [], 20);
+
+  // — shift & sistem —
+  o.shift.cashTolerance = clampInt(o.shift.cashTolerance, 0, 10000000, 0);
+  o.sistem.refreshSec = clampInt(o.sistem.refreshSec, 30, 3600, 120);
+  o.sistem.salesDays = clampInt(o.sistem.salesDays, 7, 730, 90);
+
+  o.ver = 2;
+  return o;
+};
+
+// Cermin modul. Selalu hasil normStore(), jadi setiap bagian dijamin lengkap
+// dan tidak pernah undefined — fungsi util boleh membacanya tanpa penjagaan.
+let CFG = normStore(null);
+const setCfg = (s) => { CFG = s && s.ver === 2 ? s : normStore(s); };
+const cfgNota = () => CFG.nota;
+const cfgStok = () => CFG.stok;
+const cfgKasir = () => CFG.kasir;
+const cfgCrm = () => CFG.crm;
+const cfgAkun = () => CFG.akun;
+const cfgSistem = () => CFG.sistem;
+
+// Pengaturan printer boleh dibuat KHUSUS PER PERANGKAT: tablet kasir memakai
+// Bluetooth 58 mm sementara laptop manajer memakai dialog browser 80 mm, tanpa
+// saling menimpa. Bawaan: mati -> perilaku persis seperti sebelumnya (ikut server).
+const DEVICE_KEY = "conflux.device.v1";
+const loadDevice = () => {
+  try {
+    const o = JSON.parse(localStorage.getItem(DEVICE_KEY) || "null");
+    if (!o || typeof o !== "object") return { on: false, paper: 58, method: "browser" };
+    return {
+      on: o.on === true,
+      paper: o.paper === 80 ? 80 : 58,
+      method: ["browser", "bluetooth", "serial"].includes(o.method) ? o.method : "browser",
+    };
+  } catch (e) { return { on: false, paper: 58, method: "browser" }; }
+};
+const saveDevice = (d) => { try { localStorage.setItem(DEVICE_KEY, JSON.stringify(d)); } catch (e) {} };
+// Profil cetak efektif: perangkat menang bila diaktifkan, selain itu ikut server.
+const printProfile = (store, dev) =>
+  dev && dev.on ? { ...store, paper: dev.paper, method: dev.method } : store;
+
 // Tampilkan waktu ramah: ISO/epoch -> waktu lokal; label seperti "Baru saja" dibiarkan
 const fmtAt = (at) => {
   if (at == null || at === "") return "—";
@@ -39,17 +289,17 @@ const fmtAt = (at) => {
 };
 
 // Nomor nota unik berbasis tanggal+waktu (tidak bentrok antar perangkat/refresh)
-const invoiceNo = () => {
-  const d = new Date();
+const stampNo = (prefix, at) => {
+  const d = at ? new Date(at) : new Date();
   const p = (n) => String(n).padStart(2, "0");
-  return `INV-${String(d.getFullYear()).slice(2)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  return `${prefix}-${String(d.getFullYear()).slice(2)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 };
-// Nomor nota retur (format konsisten dengan INV, prefix RTR)
-const returnNoGen = () => {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  return `RTR-${String(d.getFullYear()).slice(2)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-};
+const invoiceNo = () => stampNo(cfgNota().invPrefix);
+// Nomor nota retur. Awalan "RTR" SENGAJA TIDAK bisa diubah dari Pengaturan:
+// baris retur disimpan sebagai penjualan negatif dan dipisahkan dari penjualan
+// biasa lewat awalan ini (lihat Riwayat Penjualan & Retur & Tukar).
+const RETURN_PREFIX = "RTR";
+const returnNoGen = () => stampNo(RETURN_PREFIX);
 
 // Periode bulan (YYYY-MM) -> label ramah; bulan sekarang & bulan sebelumnya
 const ID_MONTHS = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
@@ -57,7 +307,7 @@ const periodLabel = (ym) => { if (!ym) return "-"; if (ym === "all") return "Sem
 const thisPeriod = () => new Date().toISOString().slice(0, 7);
 const prevPeriod = (ym) => { const [y, m] = String(ym).split("-").map(Number); const d = new Date(y, (m || 1) - 1, 1); d.setMonth(d.getMonth() - 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
 // ===== Kedaluwarsa (expire) batch — pelengkap FIFO, murni tampilan & peringatan =====
-const EXPIRY_WARN_DAYS = 30; // ambang "dekat kedaluwarsa" (hari). Ubah angkanya bila perlu.
+// Ambang "dekat kedaluwarsa" (hari) — diatur di Pengaturan → Stok & Re-stok.
 const daysUntil = (dateStr) => {
   if (!dateStr) return null;
   const d = new Date(dateStr + "T00:00:00");
@@ -69,7 +319,7 @@ const expiryStatus = (dateStr) => {
   const d = daysUntil(dateStr);
   if (d == null) return null;
   if (d < 0) return "expired";
-  if (d <= EXPIRY_WARN_DAYS) return "soon";
+  if (d <= cfgStok().expiryWarnDays) return "soon";
   return "ok";
 };
 const fmtExpiry = (dateStr) =>
@@ -244,15 +494,15 @@ const loadCustbox = () => {
 };
 const saveCustbox = (list) => { try { localStorage.setItem(CUSTBOX_KEY, JSON.stringify(list || [])); } catch (e) {} };
 
-// Siklus order / periode review (hari) — dipakai untuk saran jumlah re-stok
-const REVIEW_DAYS = 7;
+// Siklus order / periode review (hari) — diatur di Pengaturan → Stok & Re-stok
+const reviewDays = () => cfgStok().reviewDays;
 
 // ROP = (pemakaian harian × lead time) + stok aman
 const rop = (p) => Math.round(p.dailyUsage * p.leadTime + p.safetyStock);
 
 // Order-up-to level = pemakaian harian × (lead time + siklus order) + stok aman
 const targetLevel = (p) =>
-  Math.round(p.dailyUsage * (p.leadTime + REVIEW_DAYS) + p.safetyStock);
+  Math.round(p.dailyUsage * (p.leadTime + reviewDays()) + p.safetyStock);
 
 // Saran jumlah re-stok = target level − stok saat ini
 const suggestQty = (p) => Math.max(0, targetLevel(p) - p.stock);
@@ -429,7 +679,8 @@ const SEED_CAPITAL = [
   { id: uid(), name: "Sewa & deposit awal", amount: 24000000, date: "Modal awal" },
   { id: uid(), name: "Perizinan & legalitas", amount: 5000000, date: "Modal awal" },
 ];
-const EXPENSE_CATS = ["Sewa", "Gaji", "Utilitas", "Marketing", "Operasional", "Lain-lain"];
+// Kategori biaya: daftar hidup dari Pengaturan → Akuntansi (bawaan di DEFAULT_STORE)
+const expenseCats = () => cfgAkun().expenseCats;
 const SEED_EXPENSES = [
   { id: uid(), category: "Sewa", name: "Sewa tempat (bulanan)", amount: 8000000, date: "Bln ini" },
   { id: uid(), category: "Gaji", name: "Gaji karyawan", amount: 12000000, date: "Bln ini" },
@@ -461,6 +712,7 @@ const NAV = [
   { key: "riwayat", label: "Riwayat Penjualan", icon: History, roles: ["cashier", "manager"] },
   { key: "retur", label: "Retur & Tukar", icon: Undo2, roles: ["cashier", "manager"] },
   { key: "shiftlog", label: "Shift Kasir", icon: Wallet, roles: ["manager"] },
+  { key: "pengaturan", label: "Pengaturan", icon: Settings, roles: ["manager"] },
 ];
 
 const PAY_METHODS = [
@@ -509,30 +761,32 @@ const catIcon = (category = "") => {
 // (Demo: nanti diganti otentikasi berbasis peran lewat Supabase Auth)
 const MANAGER_PIN = "1234";
 
-// Profil toko untuk header nota (bisa diubah di Pengaturan Nota)
-const DEFAULT_STORE = {
-  name: "Conflux Coffee Club",
-  addr1: "Tomohon · Manado, Sulawesi Utara",
-  addr2: "Brewing Connection, One Cup at a Time",
-  phone: "@conflux.coffee",
-  footer: "Terima kasih sudah berbelanja!",
-  pin: "1234", // PIN mode manajer (bisa diganti di Pengaturan)
-  paper: 58, // 58 atau 80 mm
-  method: "browser", // "browser" | "bluetooth" | "serial"
-};
+// Profil toko + seluruh pengaturan sistem: lihat DEFAULT_STORE di bagian atas berkas.
 
 // ===== Cetak langsung ESC/POS via Web Serial (opsional) =====
 const escposReceipt = (store, d) => {
   const W = store.paper === 80 ? 42 : 32; // jumlah karakter per baris
+  const nota = store?.nota || DEFAULT_STORE.nota;
+  const brand = String(nota.brand ?? "").trim();
   const line = (a, b) => {
     const space = Math.max(1, W - a.length - String(b).length);
     return a + " ".repeat(space) + b + "\n";
+  };
+  // Kaki nota: ucapan -> catatan tambahan -> merek -> kontak. Baris kosong dilewati
+  // supaya tidak memakan kertas percuma.
+  const foot = () => {
+    let t = "";
+    if (store.footer) t += store.footer + "\n";
+    if (nota.note) t += nota.note + "\n";
+    if (brand) t += brand + "\n";
+    if (store.phone) t += store.phone + "\n";
+    return t;
   };
   const ESC = "\x1B", GS = "\x1D";
   let s = ESC + "@"; // init
   s += ESC + "a" + "\x01"; // center
   s += ESC + "!" + "\x18" + store.name + "\n" + ESC + "!" + "\x00"; // big bold name
-  s += store.addr1 + "\n";
+  if (store.addr1) s += store.addr1 + "\n";
   if (store.addr2) s += store.addr2 + "\n";
   if (store.phone) s += store.phone + "\n";
   s += "-".repeat(W) + "\n";
@@ -543,7 +797,7 @@ const escposReceipt = (store, d) => {
     if (d.reprint) s += "-- CETAK ULANG --\n";
     s += "No : " + d.no + "\n";
     s += "Tgl: " + d.date + "\n";
-    s += "Kasir: " + d.cashier + "\n";
+    if (nota.showCashier) s += "Kasir: " + d.cashier + "\n";
     s += "Alasan: " + d.reasonLabel + "\n";
     s += "-".repeat(W) + "\n" + "BARANG DIRETUR\n";
     d.items.forEach((it) => { s += it.name + "\n"; s += line("  " + it.qtyLabel, "-" + rp(it.lineTotal)); });
@@ -558,7 +812,7 @@ const escposReceipt = (store, d) => {
     if (d.net !== 0) s += line("Metode", d.settlementLabel);
     s += "-".repeat(W) + "\n";
     s += ESC + "a" + "\x01"; // center
-    s += store.footer + "\n" + store.phone + "\n";
+    s += foot();
     s += "\n\n\n";
     s += GS + "V" + "\x42" + "\x00"; // partial cut
     return s;
@@ -567,7 +821,7 @@ const escposReceipt = (store, d) => {
   if (d.reprint) s += "-- CETAK ULANG --\n";
   s += "No : " + d.no + "\n";
   s += "Tgl: " + d.date + "\n";
-  s += "Kasir: " + d.cashier + "\n";
+  if (nota.showCashier) s += "Kasir: " + d.cashier + "\n";
   s += "-".repeat(W) + "\n";
   d.items.forEach((it) => { s += it.name + "\n"; s += line("  " + it.qtyLabel, rp(it.lineTotal)); });
   s += "-".repeat(W) + "\n";
@@ -592,7 +846,7 @@ const escposReceipt = (store, d) => {
   if (d.pickedBy) s += "Diambil oleh: " + d.pickedBy + "\n";
   s += "-".repeat(W) + "\n";
   s += ESC + "a" + "\x01"; // center
-  s += store.footer + "\n" + store.phone + "\n";
+  s += foot();
   s += "\n\n\n";
   s += GS + "V" + "\x42" + "\x00"; // partial cut
   return s;
@@ -918,13 +1172,18 @@ function PendingRescue() {
 function Receipt({ store, data }) {
   if (!data) return null;
   const d = data;
+  // Pilihan tampilan nota (logo, baris kasir, merek, catatan kaki) berasal dari
+  // Pengaturan. Fallback ke bawaan agar pratinjau tetap aman bila `store` yang
+  // dioper masih objek lama.
+  const nota = store?.nota || DEFAULT_STORE.nota;
+  const brand = String(nota.brand ?? DEFAULT_STORE.nota.brand).trim();
   if (d.kind === "retur") {
     const hasEx = d.exItems && d.exItems.length > 0;
     return (
       <div className={`receipt ${store.paper === 80 ? "w80" : ""}`}>
-        <img className="r-logo" src={LOGO} alt="" />
+        {nota.logo && <img className="r-logo" src={LOGO} alt="" />}
         <div className="r-center r-store">{store.name}</div>
-        <div className="r-center r-small">{store.addr1}</div>
+        {store.addr1 && <div className="r-center r-small">{store.addr1}</div>}
         {store.addr2 && <div className="r-center r-tag">{store.addr2}</div>}
         {store.phone && <div className="r-center r-small">{store.phone}</div>}
         <div className="r-dash" />
@@ -933,7 +1192,7 @@ function Receipt({ store, data }) {
         <div className="r-meta">
           <div className="r-row r-small"><span>No</span><span>{d.no}</span></div>
           <div className="r-row r-small"><span>Tanggal</span><span>{d.date}</span></div>
-          <div className="r-row r-small"><span>Kasir</span><span>{d.cashier}</span></div>
+          {nota.showCashier && <div className="r-row r-small"><span>Kasir</span><span>{d.cashier}</span></div>}
           <div className="r-row r-small"><span>Alasan</span><span>{d.reasonLabel}</span></div>
         </div>
         <div className="r-dash" />
@@ -962,17 +1221,18 @@ function Receipt({ store, data }) {
         <div className="r-row r-total"><span>{d.net >= 0 ? "PELANGGAN BAYAR" : "UANG KEMBALI"}</span><span>{rp(Math.abs(d.net))}</span></div>
         {d.net !== 0 && <div className="r-row r-small"><span>Metode</span><span>{d.settlementLabel}</span></div>}
         <div className="r-dash" />
-        <div className="r-center r-foot">{store.footer}</div>
-        <div className="r-center r-brand">CONFLUX COFFEE CLUB</div>
-        <div className="r-center r-small">{store.phone}</div>
+        {store.footer && <div className="r-center r-foot">{store.footer}</div>}
+        {nota.note && <div className="r-center r-small r-note">{nota.note}</div>}
+        {brand && <div className="r-center r-brand">{brand}</div>}
+        {store.phone && <div className="r-center r-small">{store.phone}</div>}
       </div>
     );
   }
   return (
     <div className={`receipt ${store.paper === 80 ? "w80" : ""}`}>
-      <img className="r-logo" src={LOGO} alt="" />
+      {nota.logo && <img className="r-logo" src={LOGO} alt="" />}
       <div className="r-center r-store">{store.name}</div>
-      <div className="r-center r-small">{store.addr1}</div>
+      {store.addr1 && <div className="r-center r-small">{store.addr1}</div>}
       {store.addr2 && <div className="r-center r-tag">{store.addr2}</div>}
       {store.phone && <div className="r-center r-small">{store.phone}</div>}
       <div className="r-dash" />
@@ -981,7 +1241,7 @@ function Receipt({ store, data }) {
       <div className="r-meta">
         <div className="r-row r-small"><span>No</span><span>{d.no}</span></div>
         <div className="r-row r-small"><span>Tanggal</span><span>{d.date}</span></div>
-        <div className="r-row r-small"><span>Kasir</span><span>{d.cashier}</span></div>
+        {nota.showCashier && <div className="r-row r-small"><span>Kasir</span><span>{d.cashier}</span></div>}
       </div>
       <div className="r-dash" />
       {d.items.map((it, i) => (
@@ -1021,9 +1281,10 @@ function Receipt({ store, data }) {
       {d.kind !== "hutang" && d.business && <div className="r-row r-small"><span>Pelanggan</span><span>{d.business}</span></div>}
       {d.pickedBy && <div className="r-row r-small"><span>Diambil oleh</span><span>{d.pickedBy}</span></div>}
       <div className="r-dash" />
-      <div className="r-center r-foot">{store.footer}</div>
-      <div className="r-center r-brand">CONFLUX COFFEE CLUB</div>
-      <div className="r-center r-small">{store.phone}</div>
+      {store.footer && <div className="r-center r-foot">{store.footer}</div>}
+      {nota.note && <div className="r-center r-small r-note">{nota.note}</div>}
+      {brand && <div className="r-center r-brand">{brand}</div>}
+      {store.phone && <div className="r-center r-small">{store.phone}</div>}
     </div>
   );
 }
@@ -1262,6 +1523,14 @@ export default function App() {
   const [btName, setBtName] = useState("");
   const managerMode = role === "manager";
   const [store, setStore] = useState(DEFAULT_STORE);
+  // Pengaturan printer khusus perangkat ini (opsional, tersimpan di localStorage).
+  const [device, setDevice] = useState(loadDevice);
+  // Profil cetak efektif = pengaturan server, ditimpa pengaturan perangkat bila aktif.
+  const printCfg = printProfile(store, device);
+  // Cermin pengaturan ke modul SEBELUM anak-anak dirender, supaya fungsi util
+  // (expiryStatus, targetLevel, invoiceNo, buildWaText, ...) memakai nilai yang
+  // sama persis dengan yang tampil di layar pada render ini juga.
+  setCfg(store);
   const [printReceipt, setPrintReceipt] = useState(null);
   const [receiptModal, setReceiptModal] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1271,6 +1540,37 @@ export default function App() {
 
   // ===== Sinkronisasi Supabase + Autentikasi =====
   const persist = (fn) => { if (hasSupabase) fn().catch((e) => { console.error("[sync]", e); flash(`Gagal menyimpan ke server — ${e?.message || "cek koneksi"}`); }); };
+
+  // Pengaturan printer perangkat: hanya di alat ini, tidak pernah dikirim ke server.
+  const applyDevice = (patch) => {
+    setDevice((d) => { const next = { ...d, ...patch }; saveDevice(next); return next; });
+  };
+
+  // ===== Simpan pengaturan sistem =====
+  // Satu-satunya jalan menulis tabel `settings`. Selalu dinormalkan lebih dulu,
+  // jadi angka yang mustahil tidak pernah sampai ke database. Layar diperbarui
+  // optimistis; bila server menolak, nilai lama dikembalikan supaya layar tidak
+  // pernah menampilkan pengaturan yang sebenarnya gagal tersimpan.
+  const [savingCfg, setSavingCfg] = useState(false);
+  const saveSettings = async (raw) => {
+    const next = normStore(raw);
+    const prev = store;
+    setStore(next);
+    if (!hasSupabase) { flash("Pengaturan disimpan di perangkat ini"); return true; }
+    setSavingCfg(true);
+    try {
+      await SettingsApi.save(next);
+      flash("Pengaturan tersimpan — berlaku di semua perangkat");
+      return true;
+    } catch (e) {
+      console.error("[settings]", e);
+      setStore(prev);
+      flash(e?.message?.includes("manajer") || e?.code === "42501"
+        ? "Hanya manajer yang boleh mengubah pengaturan toko"
+        : `Gagal menyimpan pengaturan — ${e?.message || "cek koneksi"}`);
+      return false;
+    } finally { setSavingCfg(false); }
+  };
 
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(!hasSupabase);
@@ -1286,7 +1586,7 @@ export default function App() {
   const loadAll = async () => {
     const res = await Promise.allSettled([
       Products.list(), Movements.list(), OrdersApi.list(), DebtsApi.list(),
-      Capital.list(), Expenses.list(), Sales.list({ sinceDays: 90 }), SettingsApi.get(),
+      Capital.list(), Expenses.list(), Sales.list({ sinceDays: cfgSistem().salesDays }), SettingsApi.get(),
       Consign.list(), Consign.payments(), CashDeposits.list(), ReturnsApi.list({ limit: 300 }),
       CustomersApi.list(), CustomersApi.visits({ limit: 5000 }),
     ]);
@@ -1304,7 +1604,9 @@ export default function App() {
     if (rt.status === "fulfilled") setReturns(rt.value);
     if (cu.status === "fulfilled") setCustomers(mergeLocalCustomers(cu.value));
     if (cv.status === "fulfilled") setCustVisits(cv.value);
-    if (st.status === "fulfilled" && st.value) setStore((s) => ({ ...s, ...st.value }));
+    // Pengaturan dari server WAJIB lewat normStore(): baris versi lama tetap sah,
+    // kunci baru terisi bawaan, dan angka di luar akal dijepit ke rentang aman.
+    if (st.status === "fulfilled" && st.value) setStore(normStore(st.value));
     const failed = res.filter((r) => r.status === "rejected");
     if (failed.length) { console.error("[load]", failed.map((f) => f.reason)); flash("Sebagian data gagal dimuat — cek koneksi/akses"); }
     else flash("Tersambung ke database");
@@ -1407,13 +1709,15 @@ export default function App() {
     const onWake = () => { if (document.visibilityState === "visible") { refreshProducts(); refreshLedgers(); flushOutbox(); flushCustbox(); } };
     document.addEventListener("visibilitychange", onWake);
     window.addEventListener("focus", onWake);
-    const t = setInterval(onWake, 120000);
+    const t = setInterval(onWake, cfgSistem().refreshSec * 1000);
     return () => {
       document.removeEventListener("visibilitychange", onWake);
       window.removeEventListener("focus", onWake);
       clearInterval(t);
     };
-  }, [session]);
+    // Interval ikut dipasang ulang saat manajer mengubah "tarik ulang data berkala",
+    // jadi perubahan langsung berlaku tanpa perlu login ulang.
+  }, [session, store.sistem.refreshSec]);
 
   // ===== ANTREAN OFFLINE (OUTBOX) — sumber kebenaran di ref, cermin di localStorage =====
   // Ref dipakai sebagai sumber kebenaran (bukan state) supaya checkout beruntun yang
@@ -1482,7 +1786,7 @@ export default function App() {
     if (!force && now - lastSalesRefreshRef.current < 45000) return; // rem: maks 1x / 45 dtk
     lastSalesRefreshRef.current = now;
     try {
-      const [sl, dz] = await Promise.allSettled([Sales.list({ sinceDays: 90 }), DebtsApi.list()]);
+      const [sl, dz] = await Promise.allSettled([Sales.list({ sinceDays: cfgSistem().salesDays }), DebtsApi.list()]);
       if (sl.status === "fulfilled") setSalesLog(mergeLocalSales(sl.value));
       if (dz.status === "fulfilled") setDebts(mergeLocalDebts(dz.value));
     } catch (e) { console.error("[riwayat]", e); }
@@ -2055,7 +2359,7 @@ export default function App() {
     );
     if (!hasSupabase) {
       applyReturnLocal(full);
-      if (receipt) { setPrintReceipt(receipt); setReceiptModal(true); }
+      showReceipt(receipt);
       doneFlash();
       return { status: "ok", local: true };
     }
@@ -2072,10 +2376,10 @@ export default function App() {
     await Promise.all([
       refreshProducts(true),
       ReturnsApi.list({ limit: 300 }).then(setReturns).catch(() => {}),
-      Sales.list({ sinceDays: 90 }).then(setSalesLog).catch(() => {}),
+      Sales.list({ sinceDays: cfgSistem().salesDays }).then(setSalesLog).catch(() => {}),
     ]);
     if (res?.status === "duplicate") { flash("Retur ini sudah pernah diproses"); return res; }
-    if (receipt) { setPrintReceipt(receipt); setReceiptModal(true); }
+    showReceipt(receipt);
     doneFlash();
     return res || { status: "ok" };
   };
@@ -2331,16 +2635,24 @@ export default function App() {
   };
 
   // ===== Cetak nota =====
+  // Pratinjau nota usai transaksi bisa dimatikan (Pengaturan → Nota) untuk toko
+  // yang tidak selalu mencetak struk — nota tetap tersimpan & bisa dicetak ulang
+  // dari Riwayat Penjualan kapan saja.
+  const showReceipt = (data) => {
+    if (!data) return;
+    setPrintReceipt(data);
+    if (cfgNota().autoPreview) setReceiptModal(true);
+  };
   const nowStamp = () => new Date().toLocaleString("id-ID", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
   const triggerPrint = (data) => {
-    if (store.method === "bluetooth") {
-      printViaBluetooth(store, data)
+    if (printCfg.method === "bluetooth") {
+      printViaBluetooth(printCfg, data)
         .then(() => flash("Struk terkirim ke printer Bluetooth"))
         .catch((e) => { console.error(e); flash((e && e.message) ? e.message : "Bluetooth gagal — pakai dialog browser"); setPrintReceipt(data); setTimeout(() => window.print(), 80); });
       return;
     }
-    if (store.method === "serial") {
-      printViaSerial(store, data)
+    if (printCfg.method === "serial") {
+      printViaSerial(printCfg, data)
         .then(() => flash("Nota dikirim ke printer"))
         .catch((e) => { flash("Cetak langsung gagal — pakai dialog browser"); setPrintReceipt(data); setTimeout(() => window.print(), 80); });
       return;
@@ -2362,6 +2674,16 @@ export default function App() {
     kind: "jual", no: "TES-CETAK", date: nowStamp(), cashier: cashierName || "Manajer",
     items: [{ name: "Tes Cetak Struk", qtyLabel: "1", lineTotal: 0 }],
     total: 0, methodLabel: "Tes", paid: 0, change: 0,
+  });
+  // Nota contoh untuk melihat hasil pengaturan nota sebelum dipakai berjualan.
+  // Nomornya memakai awalan yang sedang disetel, jadi ketahuan kalau salah ketik.
+  const sampleReceipt = () => ({
+    kind: "jual", no: invoiceNo(), date: nowStamp(), cashier: cashierName || "Manajer",
+    items: [
+      { name: "Dripp Syrup Caramel 760ml", qtyLabel: "1 karton", lineTotal: 690000 },
+      { name: "Masterista Powder Original Matcha 800g", qtyLabel: "2 pcs", lineTotal: 390000 },
+    ],
+    total: 1080000, methodLabel: "Tunai", paid: 1100000, change: 20000,
   });
   const buildSaleReceipt = (total, method, meta, no) => {
     return {
@@ -2544,12 +2866,18 @@ export default function App() {
             <h1>{NAV.find((n) => n.key === view)?.label}</h1>
           </div>
           <div className="topbar-right">
-            {managerMode && lowStock.length > 0 && (
+            {managerMode && cfgStok().lowStockAlert && lowStock.length > 0 && (
               <button className="alert-chip" onClick={() => setView("restok")}>
                 <Bell size={15} /> {lowStock.length} perlu re-stok
               </button>
             )}
-            <button className="icon-btn" title="Pengaturan nota & printer" onClick={() => setSettingsOpen(true)}><Settings size={19} /></button>
+            {/* Manajer: buka halaman Pengaturan lengkap. Kasir: hanya pengaturan
+                printer perangkat ini — aturan toko tidak boleh diubah dari kasir. */}
+            <button
+              className="icon-btn"
+              title={managerMode ? "Pengaturan" : "Pengaturan printer perangkat ini"}
+              onClick={() => (managerMode ? setView("pengaturan") : setSettingsOpen(true))}
+            ><Settings size={19} /></button>
           </div>
         </header>
 
@@ -2622,8 +2950,7 @@ export default function App() {
                 if (method === "hutang") flash(`Hutang ${rp(total)} dicatat — ${meta?.debtor || "Pelanggan"}`);
                 else if (method === "split") flash(`Pembayaran ${rp(total)} campur (${payListLabel(meta.payments)}) berhasil`);
                 else flash(`Pembayaran ${rp(total)} via ${PAY_LABEL[method]} berhasil`);
-                setPrintReceipt(buildSaleReceipt(total, method, meta, no));
-                setReceiptModal(true);
+                showReceipt(buildSaleReceipt(total, method, meta, no));
               }}
             />
           )}
@@ -2700,6 +3027,15 @@ export default function App() {
               onAddDeposit={addCashDeposit} onUpdateDeposit={updateCashDeposit} onDeleteDeposit={deleteCashDeposit}
             />
           )}
+          {view === "pengaturan" && managerMode && (
+            <SettingsView
+              store={store} saving={savingCfg} onSave={saveSettings}
+              device={device} setDevice={applyDevice}
+              btName={btName} onConnect={connectBt} onTest={testPrint}
+              onSample={() => triggerPrint(sampleReceipt())}
+              products={products} flash={flash}
+            />
+          )}
         </div>
       </main>
 
@@ -2716,90 +3052,29 @@ export default function App() {
           </>
         }
       >
-        <div className="receipt-preview"><Receipt store={store} data={printReceipt} /></div>
+        <div className="receipt-preview"><Receipt store={printCfg} data={printReceipt} /></div>
       </Modal>
 
-      {/* Pengaturan nota & printer */}
+      {/* Pengaturan printer PERANGKAT INI — ringkas, boleh dibuka kasir.
+          Aturan toko (harga, ambang, kategori, dsb.) ada di halaman Pengaturan
+          yang khusus manajer. */}
       <Modal
         open={settingsOpen}
-        onClose={() => { setSettingsOpen(false); persist(() => SettingsApi.save(store)); }}
-        width={520}
-        title="Pengaturan Nota & Printer"
-        footer={<button className="btn" onClick={() => { setSettingsOpen(false); persist(() => SettingsApi.save(store)); }}><Check size={15} /> Selesai</button>}
+        onClose={() => setSettingsOpen(false)}
+        width={480}
+        title="Printer Perangkat Ini"
+        footer={<button className="btn" onClick={() => setSettingsOpen(false)}><Check size={15} /> Selesai</button>}
       >
-        <div className="form">
-          <label className="fld"><span>Nama toko</span>
-            <input value={store.name} onChange={(e) => setStore((s) => ({ ...s, name: e.target.value }))} /></label>
-          <label className="fld"><span>Alamat / lokasi</span>
-            <input value={store.addr1} onChange={(e) => setStore((s) => ({ ...s, addr1: e.target.value }))} /></label>
-          <label className="fld"><span>Baris kedua (tagline)</span>
-            <input value={store.addr2} onChange={(e) => setStore((s) => ({ ...s, addr2: e.target.value }))} /></label>
-          <div className="grid2">
-            <label className="fld"><span>Kontak / IG</span>
-              <input value={store.phone} onChange={(e) => setStore((s) => ({ ...s, phone: e.target.value }))} /></label>
-            <label className="fld"><span>Ucapan footer</span>
-              <input value={store.footer} onChange={(e) => setStore((s) => ({ ...s, footer: e.target.value }))} /></label>
-          </div>
-
-          {managerMode && !hasSupabase && (
-            <>
-              <div className="form-section">Keamanan</div>
-              <label className="fld"><span>PIN Manajer</span>
-                <input type="text" inputMode="numeric" maxLength={8} value={store.pin || ""} placeholder="cth. 1234"
-                  onChange={(e) => setStore((s) => ({ ...s, pin: e.target.value.replace(/\D/g, "") }))} />
-                <span className="hint">PIN untuk masuk mode Manajer (minimal 4 digit). Tersimpan saat Anda klik “Selesai”. Kalau dikosongkan, PIN kembali ke 1234.</span>
-              </label>
-            </>
-          )}
-
-          <div className="form-section">Printer</div>
-          <label className="fld"><span>Lebar kertas</span>
-            <div className="seg">
-              <button type="button" className={store.paper === 58 ? "on" : ""} onClick={() => setStore((s) => ({ ...s, paper: 58 }))}>58 mm</button>
-              <button type="button" className={store.paper === 80 ? "on" : ""} onClick={() => setStore((s) => ({ ...s, paper: 80 }))}>80 mm</button>
-            </div>
-          </label>
-          <label className="fld"><span>Metode cetak</span>
-            <div className="seg seg-3">
-              <button type="button" className={store.method === "browser" ? "on" : ""} onClick={() => setStore((s) => ({ ...s, method: "browser" }))}>Dialog browser</button>
-              <button type="button" className={store.method === "bluetooth" ? "on" : ""} onClick={() => setStore((s) => ({ ...s, method: "bluetooth" }))}>Bluetooth</button>
-              <button type="button" className={store.method === "serial" ? "on" : ""} onClick={() => setStore((s) => ({ ...s, method: "serial" }))}>USB/Serial</button>
-            </div>
-            <span className="hint">
-              {store.method === "browser"
-                ? "Cetak lewat dialog browser — pilih printer thermal yang sudah terpasang. Paling kompatibel (semua perangkat)."
-                : store.method === "bluetooth"
-                ? "Untuk tablet/HP: kirim langsung ke printer thermal Bluetooth (ESC/POS). Didukung Chrome di Android & ChromeOS. iPad/iPhone belum mendukung Web Bluetooth — pakai dialog browser."
-                : "Kirim ESC/POS langsung ke printer (Chrome/Edge desktop). Cocok untuk printer USB/serial; jika gagal otomatis kembali ke dialog browser."}
-            </span>
-          </label>
-
-          {store.method === "bluetooth" && (
-            <div className="bt-box">
-              <div className="bt-status">
-                <span className={`bt-dot ${btName ? "on" : ""}`} />
-                {btName ? <span>Terhubung: <b>{btName}</b></span> : <span className="muted">Belum terhubung ke printer</span>}
-              </div>
-              <div className="bt-actions">
-                <button type="button" className="btn sm" onClick={connectBt}><Bluetooth size={15} /> {btName ? "Hubungkan ulang" : "Hubungkan printer"}</button>
-                <button type="button" className="btn ghost sm" disabled={!btName} onClick={testPrint}><Printer size={14} /> Tes cetak</button>
-              </div>
-              <span className="hint">Tekan “Hubungkan printer”, pilih printer dari daftar Bluetooth, lalu “Tes cetak”. Pairing perlu diulang setiap kali aplikasi dibuka ulang (aturan keamanan browser).</span>
-            </div>
-          )}
-
-          <button className="btn ghost full" onClick={() => triggerPrint({
-            kind: "jual", no: "INV-CONTOH", date: nowStamp(), cashier: "Manajer",
-            items: [{ name: "Dripp Syrup Caramel 760ml", qtyLabel: "1 karton", lineTotal: 690000 }, { name: "Masterista Powder Original Matcha 800g", qtyLabel: "2 pcs", lineTotal: 390000 }],
-            total: 1080000, methodLabel: "Tunai", paid: 1100000, change: 20000,
-          })}><Printer size={15} /> Cetak nota contoh</button>
-        </div>
+        <DevicePrinter
+          device={device} setDevice={applyDevice} store={store}
+          btName={btName} onConnect={connectBt} onTest={testPrint} managerMode={managerMode}
+        />
       </Modal>
 
       {/* Layer tersembunyi khusus untuk dicetak */}
       <div id="receipt-print">
-        <style>{`@media print{@page{size:${store.paper === 80 ? "80mm" : "58mm"} auto;margin:0}}`}</style>
-        <Receipt store={store} data={printReceipt} />
+        <style>{`@media print{@page{size:${printCfg.paper === 80 ? "80mm" : "58mm"} auto;margin:0}}`}</style>
+        <Receipt store={printCfg} data={printReceipt} />
       </div>
 
       <Modal
@@ -2873,9 +3148,21 @@ export default function App() {
                 )}
                 <div className="shift-row strong"><span>Seharusnya di laci</span><span className="tab">{rp(c.expectedCash || 0)}</span></div>
                 <div className="shift-row"><span>Hasil hitungan Anda</span><span className="tab">{rp(c.closingCash || 0)}</span></div>
-                <div className={`shift-diff ${v === 0 ? "ok" : v > 0 ? "over" : "short"}`}>
-                  {v === 0 ? "PAS ✓" : v > 0 ? `Lebih ${rp(v)}` : `Kurang ${rp(Math.abs(v))}`}
-                </div>
+                {/* Selisih SELALU ditampilkan apa adanya. "Batas wajar" hanya
+                    mengubah warna penanda, supaya manajer tahu mana yang perlu
+                    ditelusuri dan mana yang sekadar pembulatan uang receh. */}
+                {(() => {
+                  const tol = store.shift.cashTolerance;
+                  const wajar = v !== 0 && Math.abs(v) <= tol;
+                  return (
+                    <>
+                      <div className={`shift-diff ${v === 0 || wajar ? "ok" : v > 0 ? "over" : "short"}`}>
+                        {v === 0 ? "PAS ✓" : v > 0 ? `Lebih ${rp(v)}` : `Kurang ${rp(Math.abs(v))}`}
+                      </div>
+                      {wajar && <div className="muted xs" style={{ textAlign: "center" }}>Masih dalam batas wajar toko ({rp(tol)}) — tetap tercatat permanen.</div>}
+                    </>
+                  );
+                })()}
               </div>
               {shiftReport.report && Object.keys(shiftReport.report.byMethod || {}).length > 0 && (
                 <div className="shift-methods">
@@ -3857,11 +4144,15 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
 /* ============================ Product Form (Tambah / Edit) ============================ */
 
 function ProductForm({ product, products, categories, onClose, onSave }) {
+  // Nilai bawaan barang baru (satuan, pemakaian harian, lead time, stok aman)
+  // diatur di Pengaturan → Stok & Re-stok, jadi tidak perlu diketik ulang tiap
+  // menambah barang.
+  const S = cfgStok();
   const [f, setF] = useState(
     product || {
-      name: "", sku: "", category: "", unit: "pcs", price: 0, cost: 0, stock: 0,
+      name: "", sku: "", category: "", unit: S.newUnit, price: 0, cost: 0, stock: 0,
       cartonSize: 0, priceCarton: 0, promo: { active: false, type: "percent", value: 0 },
-      dailyUsage: 1, leadTime: 1, safetyStock: 0,
+      dailyUsage: S.newDailyUsage, leadTime: S.newLeadTime, safetyStock: S.newSafetyStock,
       isConsign: false, supplier: "",
     }
   );
@@ -3872,7 +4163,8 @@ function ProductForm({ product, products, categories, onClose, onSave }) {
   const valid = String(f.name).trim().length > 0;
 
   const allProducts = products || [];
-  const unitOptions = Array.from(new Set([...allProducts.map((p) => p.unit).filter(Boolean), "pcs", "botol", "kg", "pack", "sachet", "box"]));
+  // Daftar satuan = satuan yang sudah dipakai di katalog + daftar dari Pengaturan
+  const unitOptions = Array.from(new Set([...allProducts.map((p) => p.unit).filter(Boolean), ...S.units]));
   const supplierOptions = Array.from(new Set(allProducts.map((p) => p.supplier).filter(Boolean)));
 
   // Saat kategori berganti, SKU ikut dibuat otomatis (selama belum diubah manual)
@@ -3891,7 +4183,7 @@ function ProductForm({ product, products, categories, onClose, onSave }) {
     onSave({
       name: String(f.name).trim(),
       sku: String(f.sku || "").trim().toUpperCase() || genSku(cat, allProducts),
-      category: cat, unit: String(f.unit || "pcs").trim(),
+      category: cat, unit: String(f.unit || S.newUnit || "pcs").trim(),
       price: Number(f.price) || 0, cost: Number(f.cost) || 0,
       // Mode edit: kolom stok yang DIKOSONGKAN berarti "tidak diubah" (bukan nol).
       // Tanpa ini, mengedit harga sambil tak sengaja menghapus isi kolom stok akan
@@ -4056,11 +4348,20 @@ function ProductForm({ product, products, categories, onClose, onSave }) {
 /* ============================ Kasir / POS ============================ */
 
 function Kasir({ products, customers = [], onCheckout }) {
+  // Aturan kasir (metode bayar aktif, tombol uang cepat, kewajiban isi) berasal
+  // dari Pengaturan → Kasir. Dibaca tiap render supaya perubahan langsung terasa.
+  const K = cfgKasir();
+  const payMethods = PAY_METHODS.filter((m) => K.methods.includes(m.key));
   const [q, setQ] = useState("");
   const [cart, setCart] = useState({}); // "pid|mode" -> qty
   const [paid, setPaid] = useState("");
-  const [method, setMethod] = useState("cash");
+  const [method, setMethod] = useState(K.defaultMethod);
   const [cat, setCat] = useState("all");
+  // Metode yang sedang dipilih baru saja dimatikan manajer -> pindah ke bawaan,
+  // jangan biarkan kasir memakai metode yang sudah tidak berlaku.
+  useEffect(() => {
+    if (!K.methods.includes(method)) setMethod(K.defaultMethod);
+  }, [K.methods.join(","), K.defaultMethod]);
 
   // ===== Pelanggan (dicatat untuk SEMUA transaksi, bukan hanya hutang) =====
   const [cust, setCust] = useState(null);       // pelanggan lama yang dipilih
@@ -4174,7 +4475,13 @@ function Kasir({ products, customers = [], onCheckout }) {
 
   // Bon hutang TANPA nama = piutang yang tidak bisa ditagih. Karena itu nama
   // pelanggan WAJIB untuk metode hutang (metode lain tetap opsional).
-  const canPay = lines.length > 0 && (isSplit ? splitOk : (!isCash || change >= 0)) && (!isHutang || !!custPick?.name);
+  // Wajib isi "uang diterima" saat tunai (opsional, dari Pengaturan): mencegah
+  // kembalian dikira-kira dan selisih kas saat tutup shift.
+  const paidOk = !isCash || (!K.requirePaid ? change >= 0 : (paid !== "" && change >= 0));
+  // Wajib mencatat pelanggan (opsional): berguna untuk toko yang ingin riwayat
+  // pembelian lengkap. Metode hutang SELALU wajib bernama.
+  const custOk = (!K.requireCustomer || !!custPick?.name || !!custPick?.business) && (!isHutang || !!custPick?.name);
+  const canPay = lines.length > 0 && (isSplit ? splitOk : paidOk) && custOk;
 
   // Rem anti klik-ganda: keranjang baru kosong SETELAH re-render, jadi klik kedua
   // yang sangat cepat masih lolos canPay dan bisa membuat transaksi kembar.
@@ -4213,10 +4520,12 @@ function Kasir({ products, customers = [], onCheckout }) {
       })),
     };
     onCheckout(lines.map((l) => ({ pid: l.pid, qty: l.satuan })), total, method, meta);
-    setCart({}); setPaid(""); setMethod("cash"); setParts(FRESH_PARTS); resetCust();
+    setCart({}); setPaid(""); setMethod(K.defaultMethod); setParts(FRESH_PARTS); resetCust();
   };
 
-  const quickPay = [total, Math.ceil(total / 50000) * 50000, Math.ceil(total / 100000) * 100000];
+  // Tombol uang cepat: uang pas + pembulatan ke atas sesuai pecahan di Pengaturan
+  // (mis. 50.000 & 100.000). Nilai duplikat & nol disaring saat dirender.
+  const quickPay = [total, ...K.quickCash.map((v) => Math.ceil(total / v) * v)];
 
   return (
     <div className="pos">
@@ -4441,7 +4750,7 @@ function Kasir({ products, customers = [], onCheckout }) {
           </div>
 
           <div className="pay-methods">
-            {PAY_METHODS.map((m) => {
+            {payMethods.map((m) => {
               const Icon = m.icon;
               return (
                 <button key={m.key} className={`pay-method ${method === m.key ? "on" : ""}`} onClick={() => setMethod(m.key)}>
@@ -4516,6 +4825,15 @@ function Kasir({ products, customers = [], onCheckout }) {
             custPick?.name
               ? <div className="pay-note warn">Dicatat sebagai <b>hutang</b> atas nama <b>{custLabel(custPick)}</b> di menu Hutang — bisa ditandai lunas saat dibayar.</div>
               : <div className="pay-note warn">Pilih pelanggan lama atau isi <b>pelanggan baru</b> di atas dulu — bon hutang tanpa nama tidak bisa ditagih.</div>
+          )}
+
+          {/* Tombol bayar mati BUKAN tanpa sebab: aturan dari Pengaturan selalu
+              dijelaskan, supaya kasir tidak mengira aplikasinya macet. */}
+          {lines.length > 0 && !isHutang && !custOk && (
+            <div className="pay-note warn">Toko ini mewajibkan <b>data pelanggan</b> pada setiap transaksi — pilih pelanggan lama atau isi pelanggan baru di atas.</div>
+          )}
+          {lines.length > 0 && isCash && K.requirePaid && paid === "" && (
+            <div className="pay-note warn">Isi <b>uang diterima</b> dulu — wajib agar kembalian & kas laci tetap cocok saat tutup shift.</div>
           )}
 
           <button className={`btn full pay ${isHutang ? "hutang" : ""}`} disabled={!canPay} onClick={checkout}>
@@ -5118,17 +5436,21 @@ const agoLabel = (t) => {
   return `${Math.floor(d / 365)} thn lalu`;
 };
 
-// Pelanggan dianggap "pasif" bila sudah pernah belanja tapi lama tidak kembali
-const PASIF_DAYS = 45;
+// Pelanggan dianggap "pasif" bila sudah pernah belanja tapi lama tidak kembali.
+// Ambangnya (dan rentang "baru") diatur di Pengaturan → Pelanggan.
+const pasifDays = () => cfgCrm().pasifDays;
+const newDays = () => cfgCrm().newDays;
 
-const CUST_FILTERS = [
+// Dijadikan FUNGSI (bukan array tetap) supaya label ikut berubah begitu ambangnya
+// diubah dari layar Pengaturan, tanpa perlu muat ulang aplikasi.
+const custFilters = () => [
   ["all", "Semua"],
   ["returning", "Pelanggan kembali"],
-  ["baru", "Baru (30 hari)"],
+  ["baru", `Baru (${newDays()} hari)`],
   ["bisnis", "Bisnis"],
   ["individu", "Individu"],
   ["hutang", "Punya hutang"],
-  ["pasif", `Pasif >${PASIF_DAYS} hari`],
+  ["pasif", `Pasif >${pasifDays()} hari`],
   ["nophone", "Tanpa no. telp"],
 ];
 const CUST_SORTS = [
@@ -5145,32 +5467,47 @@ const WA_TPL = [
   { key: "stok", label: "List stok & harga" },
   { key: "hutang", label: "Pengingat hutang" },
 ];
+// Kata kunci yang boleh dipakai di dalam templat (Pengaturan → Pelanggan).
+const WA_VARS = ["{sapaan}", "{toko}", "{nama}", "{usaha}", "{stok}", "{tagihan}", "{total}"];
+
+// Teks bawaan — dipakai bila templat di Pengaturan dikosongkan.
+const WA_DEFAULT = {
+  sapa: "{sapaan}, ini {toko} \u{1F44B}\n\nTerima kasih sudah berbelanja di tempat kami. Kalau butuh stok lagi atau ada yang mau ditanyakan, silakan balas chat ini ya. Terima kasih!",
+  promo: "{sapaan}, ini {toko} \u{1F44B}\n\nAda promo untuk minggu ini:\n\u2022 (tulis promo di sini)\n\nKalau berminat balas chat ini ya, stok terbatas. Terima kasih!",
+  stok: "{sapaan}, ini {toko} \u{1F44B}\n\nBerikut stok & harga terbaru kami:\n\n{stok}\n\nHarga sewaktu-waktu bisa berubah. Silakan balas chat ini untuk pesan ya. Terima kasih!",
+  hutang: "{sapaan}, ini {toko} \u{1F64F}\n\nMohon izin mengingatkan, ada tagihan yang belum lunas:\n{tagihan}\n\nTotal: {total}\n\nMohon konfirmasinya ya kalau sudah dibayar. Terima kasih banyak!",
+};
+
 const buildWaText = (tpl, c, ctx) => {
-  const toko = ctx.storeName || "Conflux Coffee Club";
+  const toko = ctx.storeName || CFG.name || "Conflux Coffee Club";
   const sapaan = String(c.business || "").trim() ? `Halo ${c.business}` : `Halo Kak ${c.name}`;
-  if (tpl === "promo") {
-    return `${sapaan}, ini ${toko} 👋\n\nAda promo untuk minggu ini:\n• (tulis promo di sini)\n\nKalau berminat balas chat ini ya, stok terbatas. Terima kasih!`;
-  }
-  if (tpl === "stok") {
-    const lines = (ctx.products || [])
-      .filter((p) => Number(p.stock) > 0)
-      .sort((a, b) => String(a.category || "").localeCompare(String(b.category || ""), "id") || String(a.name).localeCompare(String(b.name), "id"))
-      .slice(0, 25)
-      .map((p) => {
-        const harga = rp(effPrice(p.price, p.promo));
-        const ktn = hasCarton(p) ? ` | karton ${rp(effPrice(p.priceCarton, p.promo))}` : "";
-        return `• ${p.name} — ${harga}/${p.unit}${ktn}`;
-      });
-    return `${sapaan}, ini ${toko} 👋\n\nBerikut stok & harga terbaru kami:\n\n${lines.join("\n")}\n\nHarga sewaktu-waktu bisa berubah. Silakan balas chat ini untuk pesan ya. Terima kasih!`;
-  }
-  if (tpl === "hutang") {
-    const d = ctx.unpaid;
-    const rincian = d && d.list && d.list.length
-      ? d.list.map((x) => `• ${x.id} (${x.date}) — ${rp(x.total)}`).join("\n")
-      : "";
-    return `${sapaan}, ini ${toko} 🙏\n\nMohon izin mengingatkan, ada tagihan yang belum lunas:\n${rincian}\n\nTotal: ${rp(d?.total || 0)}\n\nMohon konfirmasinya ya kalau sudah dibayar. Terima kasih banyak!`;
-  }
-  return `${sapaan}, ini ${toko} 👋\n\nTerima kasih sudah berbelanja di tempat kami. Kalau butuh stok lagi atau ada yang mau ditanyakan, silakan balas chat ini ya. Terima kasih!`;
+  const daftarStok = (ctx.products || [])
+    .filter((p) => Number(p.stock) > 0)
+    .sort((a, b) => String(a.category || "").localeCompare(String(b.category || ""), "id") || String(a.name).localeCompare(String(b.name), "id"))
+    .slice(0, cfgCrm().waStokMax)
+    .map((p) => {
+      const harga = rp(effPrice(p.price, p.promo));
+      const ktn = hasCarton(p) ? ` | karton ${rp(effPrice(p.priceCarton, p.promo))}` : "";
+      return `\u2022 ${p.name} — ${harga}/${p.unit}${ktn}`;
+    })
+    .join("\n");
+  const d = ctx.unpaid;
+  const tagihan = d && d.list && d.list.length
+    ? d.list.map((x) => `\u2022 ${x.id} (${x.date}) — ${rp(x.total)}`).join("\n")
+    : "";
+  const vals = {
+    "{sapaan}": sapaan,
+    "{toko}": toko,
+    "{nama}": String(c.name || "").trim(),
+    "{usaha}": String(c.business || "").trim(),
+    "{stok}": daftarStok,
+    "{tagihan}": tagihan,
+    "{total}": rp(d?.total || 0),
+  };
+  const key = WA_DEFAULT[tpl] ? tpl : "sapa";
+  const custom = String(cfgCrm().wa?.[key] || "").trim();
+  const body = custom || WA_DEFAULT[key];
+  return WA_VARS.reduce((acc, k) => acc.split(k).join(vals[k] ?? ""), body);
 };
 
 function CustomersView({
@@ -5307,7 +5644,7 @@ function CustomersView({
   const list = useMemo(() => {
     const term = q.trim().toLowerCase();
     const digits = q.replace(/\D/g, "");
-    const since30 = Date.now() - 30 * DAY;
+    const sinceNew = Date.now() - newDays() * DAY;   // rentang "pelanggan baru" dari Pengaturan
     let out = customers.filter((c) => {
       if (term) {
         const hay = `${c.name || ""} ${c.business || ""} ${c.note || ""}`.toLowerCase();
@@ -5315,11 +5652,11 @@ function CustomersView({
         if (!hay.includes(term) && !(digits.length >= 3 && ph.includes(digits))) return false;
       }
       if (filter === "returning") return (c.txnCount || 0) >= 2;
-      if (filter === "baru") return (c.firstTxnAt || 0) >= since30;
+      if (filter === "baru") return (c.firstTxnAt || 0) >= sinceNew;
       if (filter === "bisnis") return isBiz(c);
       if (filter === "individu") return !isBiz(c);
       if (filter === "hutang") return !!unpaidOf(c);
-      if (filter === "pasif") return (c.txnCount || 0) >= 1 && c.lastTxnAt && (daysAgo(c.lastTxnAt) || 0) > PASIF_DAYS;
+      if (filter === "pasif") return (c.txnCount || 0) >= 1 && c.lastTxnAt && (daysAgo(c.lastTxnAt) || 0) > pasifDays();
       if (filter === "nophone") return !normPhone(c.phone);
       return true;
     });
@@ -5407,7 +5744,7 @@ function CustomersView({
       ws.getRow(1).height = 24; ws.getRow(2).height = 12;
       const sub = ws.getCell(3, 1);
       ws.mergeCells(3, 1, 3, cols.length);
-      sub.value = `Dicetak ${new Date().toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" })} · ${list.length} pelanggan · Saringan: ${(CUST_FILTERS.find((f) => f[0] === filter) || [])[1] || "Semua"}${q.trim() ? ` · Kata kunci "${q.trim()}"` : ""}`;
+      sub.value = `Dicetak ${new Date().toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" })} · ${list.length} pelanggan · Saringan: ${(custFilters().find((f) => f[0] === filter) || [])[1] || "Semua"}${q.trim() ? ` · Kata kunci "${q.trim()}"` : ""}`;
       sub.font = { size: 10, italic: true, color: { argb: "FF6B675C" } };
       sub.alignment = { horizontal: "center" };
       ws.getRow(4).height = 6;
@@ -5594,7 +5931,7 @@ function CustomersView({
             {q && <button className="icon-btn xs" onClick={() => setQ("")}><X size={14} /></button>}
           </div>
           <div className="chips">
-            {CUST_FILTERS.map(([k, label]) => (
+            {custFilters().map(([k, label]) => (
               <button key={k} className={`chip ${filter === k ? "on" : ""}`} onClick={() => setFilter(k)}>{label}</button>
             ))}
           </div>
@@ -5633,7 +5970,7 @@ function CustomersView({
                   const u = unpaidOf(c);
                   const t = c.txnCount || 0;
                   const ph = normPhone(c.phone);
-                  const pasif = t >= 1 && c.lastTxnAt && (daysAgo(c.lastTxnAt) || 0) > PASIF_DAYS;
+                  const pasif = t >= 1 && c.lastTxnAt && (daysAgo(c.lastTxnAt) || 0) > pasifDays();
                   return (
                     <tr key={c.id}>
                       <td>
@@ -6144,7 +6481,7 @@ function Restock({ products, onReceive }) {
             <b>ROP</b> = (Pemakaian harian × Lead time) + Stok aman
           </div>
           <div className="formula-line">
-            <b>Saran jumlah</b> = Pemakaian harian × (Lead time + Siklus order {REVIEW_DAYS} hari) + Stok aman − Stok saat ini
+            <b>Saran jumlah</b> = Pemakaian harian × (Lead time + Siklus order {reviewDays()} hari) + Stok aman − Stok saat ini
           </div>
           <div className="muted xs">Barang dipesan ketika stok menyentuh atau di bawah ROP (titik pesan ulang).</div>
         </div>
@@ -6185,7 +6522,7 @@ function Restock({ products, onReceive }) {
                     <div><span>Stok aman</span><b>{num(p.safetyStock)}</b></div>
                     <hr />
                     <div><span>ROP = {p.dailyUsage}×{p.leadTime} + {p.safetyStock}</span><b>{num(r)}</b></div>
-                    <div><span>Target = {p.dailyUsage}×({p.leadTime}+{REVIEW_DAYS}) + {p.safetyStock}</span><b>{num(t)}</b></div>
+                    <div><span>Target = {p.dailyUsage}×({p.leadTime}+{reviewDays()}) + {p.safetyStock}</span><b>{num(t)}</b></div>
                     <div className="calc-final"><span>Saran = {num(t)} − {num(p.stock)}</span><b>{num(s)}</b></div>
                   </div>
                 )}
@@ -7062,10 +7399,18 @@ function Accounting({ products, capital, expenses, salesLog, consigns = [], cons
 }
 
 function EntryForm({ kind, entry, defaultPeriod, onClose, onSave }) {
+  // Daftar kategori biaya diambil dari Pengaturan. Kategori entri LAMA yang sudah
+  // dihapus dari daftar tetap ditampilkan supaya nilainya tidak diam-diam berubah
+  // saat entri itu diedit.
+  const expCats = (() => {
+    const base = expenseCats();
+    const cur = String(entry?.category || "").trim();
+    return cur && !base.includes(cur) ? [...base, cur] : base;
+  })();
   const [f, setF] = useState(entry || {
     name: "", amount: 0,
     date: kind === "capital" ? "Modal awal" : "Bln ini",
-    category: "Operasional",
+    category: expCats.includes("Operasional") ? "Operasional" : expCats[0],
     period: defaultPeriod || thisPeriod(),
     items: [],
   });
@@ -7085,7 +7430,7 @@ function EntryForm({ kind, entry, defaultPeriod, onClose, onSave }) {
     if (kind === "expense") {
       const period = f.period || thisPeriod();
       const cleanItems = items.map((it) => ({ label: String(it.label).trim(), amount: Number(it.amount) || 0 })).filter((it) => it.label);
-      onSave({ name: String(f.name).trim(), amount: total, category: f.category || "Lain-lain", period, date: periodLabel(period), items: cleanItems });
+      onSave({ name: String(f.name).trim(), amount: total, category: f.category || expCats[expCats.length - 1] || "Lain-lain", period, date: periodLabel(period), items: cleanItems });
     } else {
       onSave({ name: String(f.name).trim(), amount: Number(f.amount) || 0, date: String(f.date || "").trim() || "-" });
     }
@@ -7105,7 +7450,7 @@ function EntryForm({ kind, entry, defaultPeriod, onClose, onSave }) {
         {kind === "expense" && (
           <label className="fld"><span>Kategori</span>
             <select className="sim-select" value={f.category} onChange={(e) => set("category", e.target.value)}>
-              {EXPENSE_CATS.map((c) => <option key={c} value={c}>{c}</option>)}
+              {expCats.map((c) => <option key={c} value={c}>{c}</option>)}
             </select></label>
         )}
 
@@ -7149,7 +7494,10 @@ function EntryForm({ kind, entry, defaultPeriod, onClose, onSave }) {
 // Sengaja TERPISAH dari EntryForm (biaya/modal) supaya jelas ini bukan pengeluaran.
 function DepositForm({ entry, defaultAccount, onClose, onSave }) {
   const today = new Date().toISOString().slice(0, 10);
-  const [f, setF] = useState(entry || { amount: 0, depositedAt: today, account: defaultAccount || "", note: "" });
+  // Daftar rekening dari Pengaturan → Akuntansi. Kolom tetap bisa diketik bebas;
+  // daftar hanya mempercepat & menyeragamkan penulisan nama rekening.
+  const accounts = cfgAkun().accounts;
+  const [f, setF] = useState(entry || { amount: 0, depositedAt: today, account: defaultAccount || accounts[0] || "", note: "" });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const amount = Number(f.amount) || 0;
   const date = f.depositedAt || today;
@@ -7184,7 +7532,10 @@ function DepositForm({ entry, defaultAccount, onClose, onSave }) {
             <input type="date" value={date} onChange={(e) => e.target.value && set("depositedAt", e.target.value)} /></label>
         </div>
         <label className="fld"><span>Rekening tujuan</span>
-          <input value={f.account} onChange={(e) => set("account", e.target.value)} placeholder="cth. BCA 1234567890 a.n. Conflux" /></label>
+          <input list="conflux-akun-bank" value={f.account} onChange={(e) => set("account", e.target.value)} placeholder="cth. BCA 1234567890 a.n. Conflux" />
+          <datalist id="conflux-akun-bank">{accounts.map((a) => <option key={a} value={a} />)}</datalist>
+          {accounts.length === 0 && <span className="hint">Daftar rekening bisa disiapkan di Pengaturan → Akuntansi agar tidak diketik ulang setiap kali.</span>}
+        </label>
         <label className="fld"><span>Catatan (opsional)</span>
           <input value={f.note} onChange={(e) => set("note", e.target.value)} placeholder="cth. setoran hasil 3 hari" /></label>
         {amount > 0 && <div className="muted xs">Akan dicatat: <b style={{ color: "var(--teal)" }}>{rp(amount)}</b> disetor {new Date(date + "T00:00:00").toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" })}</div>}
@@ -7602,6 +7953,634 @@ function ReturnFlow({ products, salesTxns, returnedByTxn, cashierName, onClose, 
   );
 }
 
+/* ============================ Pengaturan ============================
+   Satu tempat untuk mengubah perilaku sistem tanpa menyentuh kode.
+
+   Prinsip yang dipegang layar ini:
+   1. DRAF DULU. Semua perubahan ditahan di memori; database hanya ditulis
+      saat tombol "Simpan perubahan" ditekan. Salah klik tidak langsung
+      mengubah cara toko berjualan.
+   2. SELALU ADA JALAN PULANG. Tombol "Batalkan" mengembalikan draf ke
+      kondisi tersimpan, dan tiap bagian punya "kembalikan bawaan".
+   3. AKIBATNYA DIJELASKAN. Tiap pengaturan diberi keterangan singkat soal
+      apa yang berubah di layar kasir / stok / laporan.
+   ==================================================================== */
+
+// Baris kolom isian dengan keterangan di bawahnya
+function SetFld({ label, hint, children, wide }) {
+  return (
+    <label className={`set-fld ${wide ? "wide" : ""}`}>
+      <span className="set-lbl">{label}</span>
+      {children}
+      {hint && <span className="set-hint">{hint}</span>}
+    </label>
+  );
+}
+
+// Sakelar hidup/mati
+function SetToggle({ label, hint, on, onChange }) {
+  return (
+    <button type="button" className={`set-toggle ${on ? "on" : ""}`} onClick={() => onChange(!on)}>
+      <span className={`set-sw ${on ? "on" : ""}`}><i /></span>
+      <span className="set-toggle-txt">
+        <b>{label}</b>
+        {hint && <span className="set-hint">{hint}</span>}
+      </span>
+    </button>
+  );
+}
+
+// Daftar teks/angka yang bisa ditambah & dihapus (satuan, kategori, rekening, ...)
+function SetList({ items, onChange, placeholder, numeric, hint, min = 1 }) {
+  const [v, setV] = useState("");
+  const add = () => {
+    const raw = v.trim();
+    if (!raw) return;
+    const val = numeric ? String(Math.max(0, Math.round(Number(raw.replace(/\D/g, "")) || 0))) : raw;
+    if (numeric && Number(val) <= 0) return;
+    if (items.some((x) => String(x) === val)) { setV(""); return; }
+    onChange([...items, numeric ? Number(val) : val]);
+    setV("");
+  };
+  const del = (i) => onChange(items.filter((_, j) => j !== i));
+  return (
+    <div className="set-list">
+      <div className="set-chips">
+        {items.map((x, i) => (
+          <span key={`${x}-${i}`} className="set-chip">
+            {numeric ? rp(x) : x}
+            {/* Daftar tidak boleh dikosongkan habis: sistem butuh minimal satu
+                nilai agar tidak jatuh ke keadaan tanpa pilihan sama sekali. */}
+            {items.length > min && (
+              <button type="button" onClick={() => del(i)} title="Hapus"><X size={12} /></button>
+            )}
+          </span>
+        ))}
+        {items.length === 0 && <span className="set-empty">Belum ada isi</span>}
+      </div>
+      <div className="set-add">
+        <input
+          value={v}
+          inputMode={numeric ? "numeric" : "text"}
+          placeholder={placeholder}
+          onChange={(e) => setV(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }}
+        />
+        <button type="button" className="btn ghost sm" onClick={add}><Plus size={14} /> Tambah</button>
+      </div>
+      {hint && <span className="set-hint">{hint}</span>}
+    </div>
+  );
+}
+
+/* ---------- Pengaturan printer khusus perangkat ini ---------- */
+// Lebar kertas & cara cetak sering BERBEDA antar alat: tablet kasir memakai
+// Bluetooth 58 mm, laptop manajer memakai dialog browser 80 mm. Kalau disimpan
+// di server, satu alat akan terus menimpa setelan alat lain. Karena itu di sini
+// tersedia timpaan lokal yang hanya berlaku di perangkat yang sedang dipakai.
+function DevicePrinter({ device, setDevice, store, btName, onConnect, onTest, managerMode }) {
+  const eff = printProfile(store, device);
+  return (
+    <div className="form">
+      <SetToggle
+        label="Pakai setelan printer khusus perangkat ini"
+        hint="Kalau mati, perangkat ini mengikuti setelan printer dari Pengaturan toko."
+        on={device.on}
+        onChange={(v) => setDevice({ on: v })}
+      />
+
+      <div className={device.on ? "" : "set-locked"}>
+        <label className="fld"><span>Lebar kertas</span>
+          <div className="seg">
+            <button type="button" disabled={!device.on} className={eff.paper === 58 ? "on" : ""} onClick={() => setDevice({ paper: 58 })}>58 mm</button>
+            <button type="button" disabled={!device.on} className={eff.paper === 80 ? "on" : ""} onClick={() => setDevice({ paper: 80 })}>80 mm</button>
+          </div>
+        </label>
+        <label className="fld"><span>Metode cetak</span>
+          <div className="seg seg-3">
+            <button type="button" disabled={!device.on} className={eff.method === "browser" ? "on" : ""} onClick={() => setDevice({ method: "browser" })}>Dialog browser</button>
+            <button type="button" disabled={!device.on} className={eff.method === "bluetooth" ? "on" : ""} onClick={() => setDevice({ method: "bluetooth" })}>Bluetooth</button>
+            <button type="button" disabled={!device.on} className={eff.method === "serial" ? "on" : ""} onClick={() => setDevice({ method: "serial" })}>USB/Serial</button>
+          </div>
+        </label>
+      </div>
+
+      <div className="set-eff">
+        Yang dipakai perangkat ini sekarang: <b>{eff.paper} mm</b> ·{" "}
+        <b>{eff.method === "browser" ? "Dialog browser" : eff.method === "bluetooth" ? "Bluetooth" : "USB/Serial"}</b>
+        {!device.on && <span className="muted"> (ikut setelan toko)</span>}
+      </div>
+
+      {eff.method === "bluetooth" && (
+        <div className="bt-box">
+          <div className="bt-status">
+            <span className={`bt-dot ${btName ? "on" : ""}`} />
+            {btName ? <span>Terhubung: <b>{btName}</b></span> : <span className="muted">Belum terhubung ke printer</span>}
+          </div>
+          <div className="bt-actions">
+            <button type="button" className="btn sm" onClick={onConnect}><Bluetooth size={15} /> {btName ? "Hubungkan ulang" : "Hubungkan printer"}</button>
+            <button type="button" className="btn ghost sm" disabled={!btName} onClick={onTest}><Printer size={14} /> Tes cetak</button>
+          </div>
+          <span className="hint">Pairing perlu diulang setiap kali aplikasi dibuka ulang (aturan keamanan browser).</span>
+        </div>
+      )}
+      {eff.method !== "bluetooth" && (
+        <button type="button" className="btn ghost full" onClick={onTest}><Printer size={15} /> Tes cetak</button>
+      )}
+
+      {!managerMode && (
+        <div className="set-note">Pengaturan toko (harga, nota, ambang stok, dan lainnya) hanya bisa diubah dari akun manajer.</div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Halaman Pengaturan (khusus manajer) ---------- */
+const SET_TABS = [
+  ["toko", "Toko & Nota", Store],
+  ["printer", "Printer", Printer],
+  ["stok", "Stok & Re-stok", Package],
+  ["kasir", "Kasir", ShoppingCart],
+  ["crm", "Pelanggan", Users],
+  ["akun", "Akuntansi", LineChart],
+  ["sistem", "Shift & Sistem", ShieldCheck],
+];
+
+function SettingsView({ store, saving, onSave, device, setDevice, btName, onConnect, onTest, onSample, products = [], flash }) {
+  const [tab, setTab] = useState("toko");
+  // Draf: salinan kerja. Database baru disentuh saat "Simpan perubahan" ditekan.
+  const [d, setD] = useState(store);
+  // Kalau pengaturan berubah dari perangkat lain, draf yang BELUM diubah ikut
+  // menyegarkan diri; draf yang sedang diedit tidak diganggu supaya ketikan
+  // manajer tidak hilang di tengah jalan.
+  const dirty = JSON.stringify(d) !== JSON.stringify(store);
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  useEffect(() => { if (!dirtyRef.current) setD(store); }, [store]);
+
+  const set = (patch) => setD((s) => ({ ...s, ...patch }));
+  const sec = (k, patch) => setD((s) => ({ ...s, [k]: { ...s[k], ...patch } }));
+  const resetSec = (k) => {
+    if (k === "toko") {
+      const { name, addr1, addr2, phone, footer } = DEFAULT_STORE;
+      setD((s) => ({ ...s, name, addr1, addr2, phone, footer, nota: { ...DEFAULT_STORE.nota } }));
+    } else setD((s) => ({ ...s, [k]: { ...DEFAULT_STORE[k] } }));
+    flash && flash("Bagian ini dikembalikan ke bawaan — belum disimpan");
+  };
+
+  const save = async () => { const ok = await onSave(d); if (ok) setD(normStore(d)); };
+
+  // Cadangkan / pulihkan seluruh pengaturan sebagai satu berkas JSON.
+  const exportCfg = () => {
+    try {
+      const blob = new Blob([JSON.stringify(normStore(d), null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `pengaturan-conflux-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      flash && flash("Cadangan pengaturan diunduh");
+    } catch (e) { flash && flash("Gagal membuat cadangan"); }
+  };
+  const importCfg = (file) => {
+    if (!file) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const parsed = JSON.parse(String(r.result));
+        setD(normStore(parsed));
+        flash && flash("Cadangan dimuat ke draf — periksa lalu tekan Simpan");
+      } catch (e) { flash && flash("Berkas tidak bisa dibaca — pastikan hasil unduhan dari menu ini"); }
+    };
+    r.readAsText(file);
+  };
+
+  const N = d.nota, S = d.stok, K = d.kasir, C = d.crm, A = d.akun;
+  const nUnits = new Set(products.map((p) => p.unit).filter(Boolean));
+
+  return (
+    <div className="set-wrap">
+      <div className="set-tabs">
+        {SET_TABS.map(([k, label, Icon]) => (
+          <button key={k} className={`set-tab ${tab === k ? "on" : ""}`} onClick={() => setTab(k)}>
+            <Icon size={15} /> {label}
+          </button>
+        ))}
+      </div>
+
+      <div className="set-body">
+        {/* ===================== TOKO & NOTA ===================== */}
+        {tab === "toko" && (
+          <div className="set-cols">
+            <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Identitas toko</h3><button className="btn ghost xs" onClick={() => resetSec("toko")}><RefreshCcw size={12} /> Bawaan</button></div>
+                <p className="set-desc">Dipakai di kepala nota, pesan WhatsApp ke pelanggan, dan judul berkas export.</p>
+                <SetFld label="Nama toko">
+                  <input value={d.name} onChange={(e) => set({ name: e.target.value })} maxLength={60} />
+                </SetFld>
+                <SetFld label="Alamat / lokasi">
+                  <input value={d.addr1} onChange={(e) => set({ addr1: e.target.value })} maxLength={90} />
+                </SetFld>
+                <SetFld label="Baris kedua (tagline)">
+                  <input value={d.addr2} onChange={(e) => set({ addr2: e.target.value })} maxLength={90} />
+                </SetFld>
+                <div className="grid2">
+                  <SetFld label="Kontak / IG">
+                    <input value={d.phone} onChange={(e) => set({ phone: e.target.value })} maxLength={60} />
+                  </SetFld>
+                  <SetFld label="Ucapan penutup">
+                    <input value={d.footer} onChange={(e) => set({ footer: e.target.value })} maxLength={90} />
+                  </SetFld>
+                </div>
+              </div>
+
+              <div className="set-card">
+                <div className="set-head"><h3>Tampilan nota</h3></div>
+                <div className="grid2">
+                  <SetFld
+                    label="Awalan nomor nota"
+                    hint="Huruf/angka saja. “RTR” dipakai sistem untuk nota retur, jadi tidak bisa dipilih."
+                  >
+                    <input
+                      value={N.invPrefix}
+                      onChange={(e) => sec("nota", { invPrefix: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6) })}
+                      placeholder="INV"
+                    />
+                  </SetFld>
+                  <SetFld label="Baris merek di kaki nota" hint="Kosongkan untuk menghilangkan baris ini.">
+                    <input value={N.brand} onChange={(e) => sec("nota", { brand: e.target.value })} maxLength={60} />
+                  </SetFld>
+                </div>
+                <SetFld label="Catatan kaki tambahan" hint="Mis. syarat retur atau jam buka. Tercetak di atas baris merek." wide>
+                  <textarea rows={2} value={N.note} onChange={(e) => sec("nota", { note: e.target.value })} maxLength={240} />
+                </SetFld>
+                <SetToggle label="Tampilkan logo" hint="Logo di kepala nota." on={N.logo} onChange={(v) => sec("nota", { logo: v })} />
+                <SetToggle label="Tampilkan nama kasir" hint="Matikan bila tidak ingin nama karyawan tercetak." on={N.showCashier} onChange={(v) => sec("nota", { showCashier: v })} />
+                <SetToggle
+                  label="Buka pratinjau nota otomatis"
+                  hint="Kalau mati, kasir langsung siap melayani transaksi berikutnya. Nota tetap bisa dicetak dari Riwayat Penjualan."
+                  on={N.autoPreview} onChange={(v) => sec("nota", { autoPreview: v })}
+                />
+              </div>
+            </div>
+
+            <div className="set-col">
+              <div className="set-card sticky">
+                <div className="set-head"><h3>Pratinjau nota</h3></div>
+                <p className="set-desc">Berubah langsung mengikuti draf di sebelah kiri.</p>
+                <div className="set-preview">
+                  <Receipt
+                    store={d}
+                    data={{
+                      kind: "jual", no: stampNo(N.invPrefix || "INV"),
+                      date: new Date().toLocaleString("id-ID", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }),
+                      cashier: "Contoh",
+                      items: [
+                        { name: "Dripp Syrup Caramel 760ml", qtyLabel: "1 karton", lineTotal: 690000 },
+                        { name: "Masterista Powder Matcha 800g", qtyLabel: "2 pcs", lineTotal: 390000 },
+                      ],
+                      total: 1080000, methodLabel: "Tunai", paid: 1100000, change: 20000,
+                    }}
+                  />
+                </div>
+                <button className="btn ghost full" disabled={dirty} onClick={onSample}>
+                  <Printer size={15} /> Cetak nota contoh
+                </button>
+                {dirty && <span className="set-hint">Simpan perubahan dulu supaya hasil cetak sama dengan pratinjau.</span>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================== PRINTER ===================== */}
+        {tab === "printer" && (
+          <div className="set-cols">
+            <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Setelan printer toko</h3></div>
+                <p className="set-desc">Berlaku untuk semua perangkat yang tidak punya setelan sendiri.</p>
+                <SetFld label="Lebar kertas">
+                  <div className="seg">
+                    <button type="button" className={d.paper === 58 ? "on" : ""} onClick={() => set({ paper: 58 })}>58 mm</button>
+                    <button type="button" className={d.paper === 80 ? "on" : ""} onClick={() => set({ paper: 80 })}>80 mm</button>
+                  </div>
+                </SetFld>
+                <SetFld
+                  label="Metode cetak"
+                  hint={d.method === "browser"
+                    ? "Lewat dialog browser — paling kompatibel di semua perangkat."
+                    : d.method === "bluetooth"
+                    ? "Langsung ke printer thermal Bluetooth (ESC/POS). Didukung Chrome di Android & ChromeOS; iPhone/iPad belum bisa."
+                    : "ESC/POS langsung lewat USB/serial (Chrome/Edge desktop). Bila gagal, otomatis kembali ke dialog browser."}
+                >
+                  <div className="seg seg-3">
+                    <button type="button" className={d.method === "browser" ? "on" : ""} onClick={() => set({ method: "browser" })}>Dialog browser</button>
+                    <button type="button" className={d.method === "bluetooth" ? "on" : ""} onClick={() => set({ method: "bluetooth" })}>Bluetooth</button>
+                    <button type="button" className={d.method === "serial" ? "on" : ""} onClick={() => set({ method: "serial" })}>USB/Serial</button>
+                  </div>
+                </SetFld>
+              </div>
+            </div>
+            <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Perangkat ini</h3></div>
+                <p className="set-desc">Timpaan lokal — tidak ikut tersimpan ke server dan tidak memengaruhi perangkat lain.</p>
+                <DevicePrinter
+                  device={device} setDevice={setDevice} store={store}
+                  btName={btName} onConnect={onConnect} onTest={onTest} managerMode
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================== STOK ===================== */}
+        {tab === "stok" && (
+          <div className="set-cols">
+            <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Peringatan & perhitungan</h3><button className="btn ghost xs" onClick={() => resetSec("stok")}><RefreshCcw size={12} /> Bawaan</button></div>
+                <div className="grid2">
+                  <SetFld label="Ambang dekat kedaluwarsa (hari)" hint="Batch dengan sisa umur ≤ angka ini ditandai kuning di layar Stok.">
+                    <input type="number" min="1" max="365" value={S.expiryWarnDays}
+                      onChange={(e) => sec("stok", { expiryWarnDays: e.target.value === "" ? "" : Number(e.target.value) })} />
+                  </SetFld>
+                  <SetFld label="Siklus order (hari)" hint="Seberapa sering Anda belanja ke supplier. Dipakai menghitung saran jumlah re-stok.">
+                    <input type="number" min="1" max="180" value={S.reviewDays}
+                      onChange={(e) => sec("stok", { reviewDays: e.target.value === "" ? "" : Number(e.target.value) })} />
+                  </SetFld>
+                </div>
+                <div className="set-formula">
+                  Saran jumlah = Pemakaian harian × (Lead time + <b>{clampInt(S.reviewDays, 1, 180, 7)}</b>) + Stok aman − Stok saat ini
+                </div>
+                <SetToggle
+                  label="Tampilkan lonceng “perlu re-stok”"
+                  hint="Pemberitahuan di bilah atas untuk manajer. Layar Re-stok tetap bisa dibuka walau ini dimatikan."
+                  on={S.lowStockAlert} onChange={(v) => sec("stok", { lowStockAlert: v })}
+                />
+              </div>
+            </div>
+            <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Bawaan barang baru</h3></div>
+                <p className="set-desc">Nilai yang otomatis terisi saat menambah barang, supaya tidak diketik ulang setiap kali.</p>
+                <div className="grid2">
+                  <SetFld label="Pemakaian harian">
+                    <input type="number" min="0" value={S.newDailyUsage}
+                      onChange={(e) => sec("stok", { newDailyUsage: e.target.value === "" ? "" : Number(e.target.value) })} />
+                  </SetFld>
+                  <SetFld label="Lead time (hari)">
+                    <input type="number" min="0" max="365" value={S.newLeadTime}
+                      onChange={(e) => sec("stok", { newLeadTime: e.target.value === "" ? "" : Number(e.target.value) })} />
+                  </SetFld>
+                </div>
+                <div className="grid2">
+                  <SetFld label="Stok aman">
+                    <input type="number" min="0" value={S.newSafetyStock}
+                      onChange={(e) => sec("stok", { newSafetyStock: e.target.value === "" ? "" : Number(e.target.value) })} />
+                  </SetFld>
+                  <SetFld label="Satuan bawaan">
+                    <select className="sim-select" value={S.newUnit} onChange={(e) => sec("stok", { newUnit: e.target.value })}>
+                      {S.units.map((u) => <option key={u} value={u}>{u}</option>)}
+                    </select>
+                  </SetFld>
+                </div>
+                <SetFld label="Daftar satuan" wide>
+                  <SetList
+                    items={S.units}
+                    onChange={(v) => sec("stok", { units: v })}
+                    placeholder="cth. renceng"
+                    hint="Satuan yang sudah dipakai barang di katalog tetap muncul walau tidak ada di daftar ini."
+                  />
+                </SetFld>
+                {[...nUnits].filter((u) => !S.units.includes(u)).length > 0 && (
+                  <div className="set-note">
+                    Satuan terpakai di katalog tapi belum ada di daftar: <b>{[...nUnits].filter((u) => !S.units.includes(u)).join(", ")}</b>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================== KASIR ===================== */}
+        {tab === "kasir" && (
+          <div className="set-cols">
+            <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Metode pembayaran</h3><button className="btn ghost xs" onClick={() => resetSec("kasir")}><RefreshCcw size={12} /> Bawaan</button></div>
+                <p className="set-desc">Hanya yang dicentang muncul di layar kasir. Transaksi lama dengan metode yang dimatikan tetap utuh di riwayat & laporan.</p>
+                <div className="set-checks">
+                  {PAY_METHODS.map((m) => {
+                    const Icon = m.icon;
+                    const on = K.methods.includes(m.key);
+                    const locked = m.key === "cash"; // tunai tidak boleh dimatikan
+                    return (
+                      <button
+                        key={m.key} type="button" disabled={locked}
+                        className={`set-check ${on ? "on" : ""} ${locked ? "locked" : ""}`}
+                        onClick={() => sec("kasir", { methods: on ? K.methods.filter((x) => x !== m.key) : [...K.methods, m.key] })}
+                      >
+                        <span className="set-box">{on && <Check size={12} />}</span>
+                        <Icon size={15} /> {m.label}
+                        {locked && <span className="set-lock">wajib</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+                <SetFld label="Metode terpilih saat kasir dibuka">
+                  <select className="sim-select" value={K.defaultMethod} onChange={(e) => sec("kasir", { defaultMethod: e.target.value })}>
+                    {PAY_METHODS.filter((m) => K.methods.includes(m.key) && m.key !== "split").map((m) => (
+                      <option key={m.key} value={m.key}>{m.label}</option>
+                    ))}
+                  </select>
+                </SetFld>
+                <div className="set-note">
+                  “Campur” butuh minimal dua metode non-hutang aktif; kalau tidak, pilihan itu disembunyikan otomatis.
+                </div>
+              </div>
+            </div>
+            <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Kebiasaan kasir</h3></div>
+                <SetFld label="Pecahan tombol uang cepat" wide
+                  hint="Tombol dibuat dari pembulatan total ke atas. Contoh total Rp137.000 dengan pecahan 50.000 → tombol Rp150.000.">
+                  <SetList
+                    items={K.quickCash} numeric
+                    onChange={(v) => sec("kasir", { quickCash: v })}
+                    placeholder="cth. 20000"
+                  />
+                </SetFld>
+                <SetToggle
+                  label="Wajib isi “uang diterima” untuk tunai"
+                  hint="Mencegah kembalian dikira-kira — selisih kas saat tutup shift jadi jauh berkurang."
+                  on={K.requirePaid} onChange={(v) => sec("kasir", { requirePaid: v })}
+                />
+                <SetToggle
+                  label="Wajib mencatat pelanggan di setiap transaksi"
+                  hint="Membuat riwayat pembelian lengkap, tapi memperlambat antrean saat ramai. Metode hutang tetap selalu wajib bernama."
+                  on={K.requireCustomer} onChange={(v) => sec("kasir", { requireCustomer: v })}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================== PELANGGAN ===================== */}
+        {tab === "crm" && (
+          <div className="set-cols">
+            <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Pengelompokan pelanggan</h3><button className="btn ghost xs" onClick={() => resetSec("crm")}><RefreshCcw size={12} /> Bawaan</button></div>
+                <div className="grid2">
+                  <SetFld label="Batas “pasif” (hari)" hint="Pernah belanja tapi tidak kembali selama ini akan masuk saringan Pasif.">
+                    <input type="number" min="7" max="730" value={C.pasifDays}
+                      onChange={(e) => sec("crm", { pasifDays: e.target.value === "" ? "" : Number(e.target.value) })} />
+                  </SetFld>
+                  <SetFld label="Rentang “baru” (hari)" hint="Pelanggan yang transaksi pertamanya dalam rentang ini dihitung sebagai pelanggan baru.">
+                    <input type="number" min="1" max="365" value={C.newDays}
+                      onChange={(e) => sec("crm", { newDays: e.target.value === "" ? "" : Number(e.target.value) })} />
+                  </SetFld>
+                </div>
+                <SetFld label="Maksimal baris pada pesan “list stok & harga”"
+                  hint="Pesan WhatsApp yang terlalu panjang sering terpotong di HP pelanggan.">
+                  <input type="number" min="5" max="100" value={C.waStokMax}
+                    onChange={(e) => sec("crm", { waStokMax: e.target.value === "" ? "" : Number(e.target.value) })} />
+                </SetFld>
+              </div>
+            </div>
+            <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Templat pesan WhatsApp</h3></div>
+                <p className="set-desc">
+                  Kosongkan untuk memakai teks bawaan. Kata kunci yang tersedia:{" "}
+                  {WA_VARS.map((v) => <code key={v} className="set-var">{v}</code>)}
+                </p>
+                {[["sapa", "Sapa / terima kasih"], ["promo", "Promo"], ["stok", "List stok & harga"], ["hutang", "Pengingat hutang"]].map(([k, label]) => (
+                  <SetFld key={k} label={label} wide>
+                    <textarea
+                      rows={3}
+                      value={C.wa[k]}
+                      placeholder={WA_DEFAULT[k]}
+                      onChange={(e) => sec("crm", { wa: { ...C.wa, [k]: e.target.value } })}
+                    />
+                  </SetFld>
+                ))}
+                <div className="set-note">
+                  Pesan tetap bisa diedit lagi oleh kasir sebelum dikirim — templat ini hanya titik awal.
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================== AKUNTANSI ===================== */}
+        {tab === "akun" && (
+          <div className="set-cols">
+            <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Kategori biaya</h3><button className="btn ghost xs" onClick={() => resetSec("akun")}><RefreshCcw size={12} /> Bawaan</button></div>
+                <p className="set-desc">Pilihan pada form Biaya Operasional dan pengelompokan di laporan laba-rugi.</p>
+                <SetList
+                  items={A.expenseCats}
+                  onChange={(v) => sec("akun", { expenseCats: v })}
+                  placeholder="cth. Transportasi"
+                  hint="Menghapus kategori tidak mengubah biaya yang sudah tercatat — kategori lama tetap tampil saat entri itu dibuka."
+                />
+              </div>
+            </div>
+            <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Rekening tujuan setoran</h3></div>
+                <p className="set-desc">Muncul sebagai saran saat mencatat setoran kas ke bank, supaya nama rekening seragam.</p>
+                <SetList
+                  items={A.accounts} min={0}
+                  onChange={(v) => sec("akun", { accounts: v })}
+                  placeholder="cth. BCA 1234567890 a.n. Conflux"
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================== SHIFT & SISTEM ===================== */}
+        {tab === "sistem" && (
+          <div className="set-cols">
+            <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Shift kasir</h3></div>
+                <SetFld label="Batas selisih kas wajar (Rp)"
+                  hint="Selisih di bawah nilai ini ditandai wajar pada laporan tutup shift. Selisih tetap dicatat apa adanya — angka ini hanya menandai mana yang perlu ditelusuri.">
+                  <input type="number" min="0" step="1000" value={d.shift.cashTolerance}
+                    onChange={(e) => sec("shift", { cashTolerance: e.target.value === "" ? "" : Number(e.target.value) })} />
+                </SetFld>
+                <div className="set-note">
+                  Hitungan buta saat tutup shift dan larangan menutup shift ketika masih ada transaksi belum terkirim <b>sengaja tidak bisa dimatikan</b> — keduanya pengaman utama terhadap selisih kas.
+                </div>
+              </div>
+
+              {!hasSupabase && (
+                <div className="set-card">
+                  <div className="set-head"><h3>Keamanan</h3></div>
+                  <SetFld label="PIN Manajer" hint="Minimal 4 angka. Hanya berlaku pada mode tanpa server; dengan Supabase, peran diambil dari akun login.">
+                    <input type="text" inputMode="numeric" maxLength={8} value={d.pin}
+                      onChange={(e) => set({ pin: e.target.value.replace(/\D/g, "") })} />
+                  </SetFld>
+                </div>
+              )}
+            </div>
+
+            <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Kinerja</h3><button className="btn ghost xs" onClick={() => resetSec("sistem")}><RefreshCcw size={12} /> Bawaan</button></div>
+                <div className="grid2">
+                  <SetFld label="Tarik ulang data berkala (detik)"
+                    hint="Makin kecil makin cepat stok antar perangkat sinkron, tapi makin banyak pemakaian kuota.">
+                    <input type="number" min="30" max="3600" step="10" value={d.sistem.refreshSec}
+                      onChange={(e) => sec("sistem", { refreshSec: e.target.value === "" ? "" : Number(e.target.value) })} />
+                  </SetFld>
+                  <SetFld label="Riwayat penjualan dimuat (hari)"
+                    hint="Rentang data yang ditarik saat aplikasi dibuka. Makin panjang makin berat, terutama di tablet.">
+                    <input type="number" min="7" max="730" value={d.sistem.salesDays}
+                      onChange={(e) => sec("sistem", { salesDays: e.target.value === "" ? "" : Number(e.target.value) })} />
+                  </SetFld>
+                </div>
+              </div>
+
+              <div className="set-card">
+                <div className="set-head"><h3>Cadangan pengaturan</h3></div>
+                <p className="set-desc">Simpan seluruh pengaturan sebagai satu berkas, atau pulihkan dari cadangan. Yang dipulihkan masuk ke draf dulu — tetap harus Anda periksa dan simpan.</p>
+                <div className="set-backup">
+                  <button className="btn ghost sm" onClick={exportCfg}><Download size={14} /> Unduh cadangan</button>
+                  <label className="btn ghost sm">
+                    <Upload size={14} /> Muat cadangan
+                    <input type="file" accept="application/json,.json" style={{ display: "none" }}
+                      onChange={(e) => { importCfg(e.target.files?.[0]); e.target.value = ""; }} />
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Bilah simpan — selalu terlihat, jelas kapan ada perubahan tertunda */}
+      <div className={`set-bar ${dirty ? "dirty" : ""}`}>
+        <span className="set-bar-msg">
+          {saving ? "Menyimpan…" : dirty ? "Ada perubahan yang belum disimpan" : "Semua perubahan tersimpan"}
+        </span>
+        <div className="set-bar-act">
+          <button className="btn ghost" disabled={!dirty || saving} onClick={() => setD(store)}>Batalkan</button>
+          <button className="btn" disabled={!dirty || saving} onClick={save}><Check size={15} /> Simpan perubahan</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =============================== Styles =============================== */
+
 function Style() {
   return (
     <style>{`
@@ -7886,6 +8865,101 @@ function Style() {
       .seg button.on{background:var(--surface);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.08)}
       .seg.seg-3 button{font-size:12.5px;padding:9px 4px}
       .bt-box{display:flex;flex-direction:column;gap:10px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-sm);padding:13px}
+
+      /* ===================== Pengaturan ===================== */
+      .set-wrap{display:flex;flex-direction:column;gap:16px;padding-bottom:78px}
+      .set-tabs{display:flex;gap:7px;overflow-x:auto;padding-bottom:3px;scrollbar-width:none}
+      .set-tabs::-webkit-scrollbar{display:none}
+      .set-tab{display:inline-flex;align-items:center;gap:7px;white-space:nowrap;border:1px solid var(--line);
+        background:var(--surface);color:var(--ink-soft);border-radius:999px;padding:9px 15px;font:inherit;
+        font-size:13.5px;font-weight:500;cursor:pointer;transition:.16s var(--ease)}
+      .set-tab:hover{color:var(--ink);border-color:var(--line)}
+      .set-tab.on{background:var(--accent);border-color:var(--accent);color:#fff;box-shadow:var(--shadow-accent)}
+      .set-cols{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+      .set-col{display:flex;flex-direction:column;gap:16px;min-width:0}
+      .set-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:18px;
+        display:flex;flex-direction:column;gap:14px}
+      .set-card.sticky{position:sticky;top:8px}
+      .set-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+      .set-head h3{font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:600;letter-spacing:-.01em}
+      .set-desc{font-size:12.5px;color:var(--ink-soft);line-height:1.55;margin-top:-6px}
+      .set-fld{display:flex;flex-direction:column;gap:7px}
+      .set-fld.wide{grid-column:1/-1}
+      .set-lbl{font-size:13px;font-weight:500;color:var(--ink-soft)}
+      .set-fld input,.set-fld textarea,.set-fld select{border:1px solid var(--line);border-radius:9px;padding:10px 12px;
+        font:inherit;font-size:14px;outline:none;background:var(--surface-2);width:100%}
+      .set-fld textarea{resize:vertical;line-height:1.55;font-size:13px}
+      .set-fld input:focus,.set-fld textarea:focus,.set-fld select:focus{border-color:var(--accent)}
+      .set-hint{font-size:11.5px;color:var(--ink-faint);line-height:1.5}
+      .set-note{font-size:12px;color:var(--ink-soft);line-height:1.55;background:var(--surface-2);
+        border:1px solid var(--line-soft);border-left:2px solid var(--teal);border-radius:var(--r-xs);padding:10px 12px}
+      .set-formula{font-size:12.5px;color:var(--ink-soft);background:var(--surface-2);border:1px solid var(--line-soft);
+        border-radius:var(--r-xs);padding:10px 12px;line-height:1.5}
+      .set-formula b{color:var(--teal)}
+      .set-var{font-family:ui-monospace,monospace;font-size:11px;background:var(--surface-2);border:1px solid var(--line);
+        border-radius:5px;padding:1px 5px;margin-right:4px;color:var(--teal);display:inline-block}
+      /* sakelar */
+      .set-toggle{display:flex;align-items:flex-start;gap:11px;background:var(--surface-2);border:1px solid var(--line);
+        border-radius:var(--r-sm);padding:12px 13px;text-align:left;font:inherit;color:var(--ink);cursor:pointer;
+        transition:.16s var(--ease);width:100%}
+      .set-toggle:hover{border-color:rgba(236,231,218,.16)}
+      .set-toggle.on{border-color:var(--teal-soft);background:rgba(111,174,146,.06)}
+      .set-toggle-txt{display:flex;flex-direction:column;gap:3px;min-width:0}
+      .set-toggle-txt b{font-size:13.5px;font-weight:600}
+      .set-sw{width:34px;height:20px;border-radius:999px;background:var(--surface-3);border:1px solid var(--line);
+        flex-shrink:0;position:relative;margin-top:1px;transition:.18s var(--ease)}
+      .set-sw i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--ink-faint);
+        transition:.18s var(--ease)}
+      .set-sw.on{background:var(--teal);border-color:var(--teal)}
+      .set-sw.on i{left:16px;background:#fff}
+      /* daftar chip */
+      .set-list{display:flex;flex-direction:column;gap:9px}
+      .set-chips{display:flex;flex-wrap:wrap;gap:6px;min-height:26px;align-items:center}
+      .set-chip{display:inline-flex;align-items:center;gap:6px;background:var(--surface-2);border:1px solid var(--line);
+        border-radius:999px;padding:5px 6px 5px 11px;font-size:12.5px}
+      .set-chip button{background:none;border:none;color:var(--ink-faint);cursor:pointer;display:flex;padding:2px;
+        border-radius:50%;transition:.15s}
+      .set-chip button:hover{color:var(--crit);background:var(--crit-bg)}
+      .set-empty{font-size:12px;color:var(--ink-faint)}
+      .set-add{display:flex;gap:8px}
+      .set-add input{flex:1;min-width:0;border:1px solid var(--line);border-radius:9px;padding:9px 12px;font:inherit;
+        font-size:13.5px;outline:none;background:var(--surface-2)}
+      .set-add input:focus{border-color:var(--accent)}
+      /* centang metode bayar */
+      .set-checks{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+      .set-check{display:flex;align-items:center;gap:8px;background:var(--surface-2);border:1px solid var(--line);
+        border-radius:var(--r-sm);padding:11px 12px;font:inherit;font-size:13.5px;color:var(--ink-soft);
+        cursor:pointer;transition:.16s var(--ease)}
+      .set-check.on{border-color:var(--teal);color:var(--ink);background:rgba(111,174,146,.08)}
+      .set-check.locked{opacity:.75;cursor:default}
+      .set-box{width:16px;height:16px;border-radius:5px;border:1px solid var(--line);display:flex;align-items:center;
+        justify-content:center;flex-shrink:0;color:#fff}
+      .set-check.on .set-box{background:var(--teal);border-color:var(--teal)}
+      .set-lock{margin-left:auto;font-size:10.5px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.05em}
+      /* pratinjau & lain-lain */
+      .set-preview{background:#fff;border-radius:var(--r-sm);padding:12px;display:flex;justify-content:center;
+        max-height:460px;overflow:auto}
+      .set-eff{font-size:12.5px;color:var(--ink-soft);background:var(--surface-2);border:1px solid var(--line-soft);
+        border-radius:var(--r-xs);padding:9px 12px}
+      .set-locked{opacity:.45;pointer-events:none}
+      .set-backup{display:flex;gap:9px;flex-wrap:wrap}
+      .set-backup label{cursor:pointer}
+      /* bilah simpan */
+      .set-bar{position:sticky;bottom:0;display:flex;align-items:center;justify-content:space-between;gap:12px;
+        background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px 16px;
+        box-shadow:var(--shadow);z-index:5;flex-wrap:wrap}
+      .set-bar.dirty{border-color:var(--gold);background:linear-gradient(0deg,rgba(224,165,60,.07),rgba(224,165,60,.07)),var(--surface)}
+      .set-bar-msg{font-size:13px;color:var(--ink-soft)}
+      .set-bar.dirty .set-bar-msg{color:var(--gold);font-weight:500}
+      .set-bar-act{display:flex;gap:9px;margin-left:auto}
+      @media(max-width:900px){
+        .set-cols{grid-template-columns:1fr}
+        .set-card.sticky{position:static}
+        .set-checks{grid-template-columns:1fr}
+        .set-bar{flex-direction:column;align-items:stretch}
+        .set-bar-act{margin-left:0}
+        .set-bar-act .btn{flex:1;justify-content:center}
+      }
       .bt-status{display:flex;align-items:center;gap:9px;font-size:13.5px}
       .bt-dot{width:9px;height:9px;border-radius:50%;background:var(--ink-faint);flex-shrink:0}
       .bt-dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
