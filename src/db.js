@@ -656,6 +656,18 @@ export const Auth = {
   },
   async signOut() { await supabase.auth.signOut(); },
   async getSession() { const { data } = await supabase.auth.getSession(); return data.session; },
+  // Paksa tukar refresh-token menjadi access-token baru. Dipakai saat antrean offline
+  // gagal terkirim karena token kedaluwarsa selama perangkat tidak punya internet:
+  // sekali disegarkan, paket yang sama langsung dikirim ulang tanpa hilang.
+  // Mengembalikan session baru, atau null bila refresh-token juga sudah mati
+  // (berarti kasir memang harus login ulang — antrean tetap utuh di perangkat).
+  async refresh() {
+    try {
+      const { data, error } = await supabase.auth.refreshSession();
+      if (error) return null;
+      return data?.session || null;
+    } catch (e) { return null; }
+  },
   onChange(cb) { return supabase.auth.onAuthStateChange((_e, s) => cb(s)); },
 };
 

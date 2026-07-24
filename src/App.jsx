@@ -132,6 +132,15 @@ const loadOutbox = () => {
 const saveOutbox = (list) => {
   try { localStorage.setItem(OUTBOX_KEY, JSON.stringify(list || [])); } catch (e) {}
 };
+// Kumpulan txn_id yang masih menunggu kirim (untuk menandai baris di layar Riwayat).
+const outboxTxnIds = (list) => {
+  const s = new Set();
+  (list || []).forEach((it) => (it.rows || []).forEach((r) => { if (r?.txn_id) s.add(r.txn_id); }));
+  return s;
+};
+// Total rupiah satu paket antrean — dipakai di panel diagnostik agar pemilik toko
+// bisa mencocokkan uang di laci dengan transaksi yang belum terkirim.
+const outboxItemTotal = (it) => (it?.rows || []).reduce((a, r) => a + (Number(r?.revenue) || 0), 0);
 // ID unik SEUMUR HIDUP per checkout — kunci anti-dobel di sisi server.
 const clientTxnId = () => {
   try { if (crypto?.randomUUID) return crypto.randomUUID(); } catch (e) {}
@@ -161,13 +170,64 @@ const PERMANENT_SQLSTATES = new Set([
   "23503", // foreign_key_violation
   "23514", // check_violation
 ]);
+// Error AUTENTIKASI: token kedaluwarsa selagi perangkat offline. INI BUKAN error
+// permanen dan BUKAN error jaringan — obatnya menyegarkan sesi lalu mengirim ulang.
+// Dulu kasus ini jatuh ke cabang "transien" dan diulang terus dengan token mati,
+// sehingga antrean tidak pernah terkuras walau internet sudah kembali.
+const isAuthError = (e) => {
+  const msg = String(e?.message || "").toLowerCase();
+  const code = String(e?.code || "");
+  if (code === "PGRST301" || code === "401") return true;
+  if (Number(e?.status) === 401) return true;
+  return msg.includes("jwt") || msg.includes("token is expired") || msg.includes("not authenticated")
+    || msg.includes("invalid claim") || msg.includes("unauthorized");
+};
+// Fungsi RPC belum ada / cache skema PostgREST belum menyegarkan (PGRST202).
+// WAJIB dianggap TRANSIEN: penyebabnya di server (migrasi belum dijalankan atau
+// cache belum reload), bukan pada data transaksi. Mengarantinanya = uang hilang.
+const isSchemaError = (e) => {
+  const msg = String(e?.message || "").toLowerCase();
+  return String(e?.code || "") === "PGRST202"
+    || msg.includes("could not find the function")
+    || msg.includes("schema cache");
+};
 const isPermanentSyncError = (e) => {
+  // PENJAGA UTAMA: apa pun yang berbau auth / skema / jaringan TIDAK PERNAH permanen.
+  if (isAuthError(e) || isSchemaError(e)) return false;
   const msg = String(e?.message || "").toLowerCase();
   // Raise eksplisit dari sync_sale_txn (produk hilang / input tak valid).
-  if (msg.includes("produk tidak ditemukan") || msg.includes("p_rows") || msg.includes("qty tidak valid")) return true;
+  // Catatan: pencocokan "p_rows" dipersempit — pesan "could not find the function
+  // …(p_rows…)" dari PostgREST juga mengandung "p_rows" dan dulu membuat transaksi
+  // sah dikarantina ke dead-letter. Sekarang sudah disaring isSchemaError di atas.
+  if (msg.includes("produk tidak ditemukan") || msg.includes("qty tidak valid")) return true;
+  if (msg.includes("p_rows") && (msg.includes("kosong") || msg.includes("tidak valid"))) return true;
   const code = e?.code;
   return typeof code === "string" && PERMANENT_SQLSTATES.has(code);
 };
+// Penjelasan berbahasa manusia + langkah perbaikan, ditampilkan di panel diagnostik.
+// Tujuannya kasir/pemilik tahu APA yang salah tanpa perlu membuka console browser —
+// di tablet Android console tidak bisa dibuka sama sekali.
+const syncErrorHint = (e) => {
+  if (!e) return "";
+  if (isAuthError(e)) return "Sesi login kedaluwarsa. Tekan “Segarkan sesi & kirim”, atau keluar lalu login ulang — antrean tetap aman.";
+  if (isSchemaError(e)) return "Fungsi sync_sale_txn belum ada / belum terbaca di Supabase. Jalankan migrasi SQL-nya, lalu tekan “Kirim sekarang”.";
+  const msg = String(e?.message || "").toLowerCase();
+  if (msg.includes("failed to fetch") || msg.includes("networkerror") || msg.includes("abort") || msg.includes("timeout"))
+    return "Perangkat belum benar-benar tersambung ke internet (sinyal ada tapi data tidak jalan). Cek koneksi lalu kirim ulang.";
+  if (String(e?.code || "") === "42501") return "Izin database ditolak (RLS/grant). Hubungi admin — jangan hapus data antrean.";
+  return "Kirim ulang setelah koneksi stabil. Jika tetap gagal, unduh cadangan antrean lalu kirim ke admin.";
+};
+
+// ===== CATATAN DIAGNOSTIK SINKRONISASI =====
+// Disimpan permanen di perangkat agar penyebab kegagalan bisa dibaca KAPAN SAJA,
+// termasuk setelah aplikasi ditutup/dibuka lagi. Ini yang selama ini hilang:
+// error hanya masuk console.error sehingga di tablet tidak terlihat oleh siapa pun.
+const DIAG_KEY = "conflux.sync.diag.v1";
+const loadDiag = () => {
+  try { const o = JSON.parse(localStorage.getItem(DIAG_KEY) || "null"); return o && typeof o === "object" ? o : null; }
+  catch (e) { return null; }
+};
+const saveDiag = (d) => { try { localStorage.setItem(DIAG_KEY, JSON.stringify(d || null)); } catch (e) {} };
 
 // ===== ANTREAN PENCATATAN PELANGGAN =====
 // SENGAJA DIPISAH dari antrean penjualan. Alasannya penting: pencatatan
@@ -687,12 +747,23 @@ function Toast({ msg }) {
 // ada antrean). Muncul saat: offline, sedang menyinkron, atau ada transaksi
 // menunggu (dengan tombol coba-lagi). Tujuannya kasir selalu tahu apakah data
 // sudah aman di server atau masih menunggu — tanpa perlu paham teknisnya.
-function SyncBanner({ online, syncing, pending, dead, onRetry, onCopyDead }) {
+function SyncBanner({ online, syncing, pending, dead, diag, onRetry, onOpenDiag }) {
   const deadBar = dead > 0 ? (
     <div className="sync-banner dead">
       <AlertTriangle size={16} />
-      <span><b>{dead} transaksi gagal disinkronkan</b> (mis. barang telah dihapus). Data tersimpan aman — salin untuk dipulihkan admin.</span>
-      <button className="sync-retry" onClick={onCopyDead}>Salin data</button>
+      <span><b>{dead} transaksi tertahan</b> — datanya tersimpan aman di perangkat dan masih bisa dikirim ulang.</span>
+      <button className="sync-retry" onClick={onOpenDiag}>Pulihkan</button>
+    </div>
+  ) : null;
+
+  // Kegagalan terakhir ditampilkan APA ADANYA. Dulu penyebabnya hanya masuk console
+  // browser — di tablet kasir tidak ada yang pernah melihatnya, sehingga antrean bisa
+  // macet berhari-hari tanpa seorang pun tahu.
+  const errBar = (!syncing && pending > 0 && diag && diag.ok === false) ? (
+    <div className="sync-banner dead">
+      <AlertTriangle size={16} />
+      <span><b>Penyebab: {diag.message}</b>{diag.hint ? ` — ${diag.hint}` : ""}</span>
+      <button className="sync-retry" onClick={onOpenDiag}>Rincian</button>
     </div>
   ) : null;
 
@@ -707,6 +778,7 @@ function SyncBanner({ online, syncing, pending, dead, onRetry, onCopyDead }) {
             ? `${pending} transaksi tersimpan aman di perangkat & akan otomatis terkirim saat internet kembali.`
             : "Transaksi tetap bisa dijalankan; perubahan akan tersinkron saat internet kembali."}
         </span>
+        {pending > 0 && <button className="sync-retry" onClick={onOpenDiag}>Lihat antrean</button>}
       </div>
     );
   } else if (syncing) {
@@ -720,14 +792,127 @@ function SyncBanner({ online, syncing, pending, dead, onRetry, onCopyDead }) {
     statusBar = (
       <div className="sync-banner pending">
         <Clock size={16} />
-        <span>{pending} transaksi menunggu tersinkron.</span>
-        <button className="sync-retry" onClick={onRetry}>Coba lagi</button>
+        <span><b>{pending} transaksi belum masuk server.</b> Jangan tutup/ganti perangkat ini sebelum angka jadi 0.</span>
+        <button className="sync-retry" onClick={onRetry}>Kirim sekarang</button>
+        <button className="sync-retry" onClick={onOpenDiag}>Rincian</button>
       </div>
     );
   }
 
-  if (!statusBar && !deadBar) return null;
-  return <>{statusBar}{deadBar}</>;
+  if (!statusBar && !deadBar && !errBar) return null;
+  return <>{statusBar}{errBar}{deadBar}</>;
+}
+
+// ===== PANEL DIAGNOSTIK SINKRONISASI =====
+// Satu tempat untuk menjawab pertanyaan "transaksinya ke mana?" tanpa perlu console
+// browser: isi antrean (beserta nilai rupiahnya), penyebab kegagalan terakhir, dan
+// tombol pemulihan — kirim ulang, segarkan sesi, unduh cadangan, pulihkan dari berkas.
+function SyncDiagModal({ open, onClose, pending, deadList, diag, online, syncing,
+  onRetry, onRefreshAuth, onRetryDead, onExport, onImport }) {
+  const [tab, setTab] = useState("antre");
+  const fileRef = useRef(null);
+  if (!open) return null;
+  const rows = tab === "antre" ? pending : deadList;
+  const totalRp = (rows || []).reduce((a, it) => a + outboxItemTotal(it), 0);
+  const when = (t) => (t ? new Date(t).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—");
+
+  return (
+    <Modal open={open} onClose={onClose} title="Diagnostik sinkronisasi" width={620}
+      footer={
+        <>
+          <button className="btn ghost" onClick={onExport}><Download size={15} /> Unduh cadangan</button>
+          <button className="btn ghost" onClick={() => fileRef.current?.click()}>Pulihkan dari berkas</button>
+          <button className="btn" disabled={syncing} onClick={onRetry}>
+            <RefreshCcw size={15} /> {syncing ? "Mengirim…" : "Kirim sekarang"}
+          </button>
+        </>
+      }>
+      <input ref={fileRef} type="file" accept="application/json,.json" style={{ display: "none" }}
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) onImport(f); e.target.value = ""; }} />
+
+      <div className="diag-state">
+        <div><span className="muted">Koneksi</span><b>{online ? "Tersambung" : "Terputus"}</b></div>
+        <div><span className="muted">Menunggu kirim</span><b>{pending.length}</b></div>
+        <div><span className="muted">Tertahan</span><b>{deadList.length}</b></div>
+        <div><span className="muted">Nilai tertahan</span><b>{rp(totalRp)}</b></div>
+      </div>
+
+      {diag && (
+        <div className={`diag-note ${diag.ok ? "ok" : "bad"}`}>
+          <b>{diag.ok ? "Terakhir berhasil" : "Terakhir gagal"} · {when(diag.at)}</b>
+          <div>{diag.message}{diag.code ? ` (kode ${diag.code})` : ""}</div>
+          {diag.hint && <div className="muted">{diag.hint}</div>}
+          {!diag.ok && (
+            <button className="btn ghost sm" style={{ marginTop: 8 }} onClick={onRefreshAuth}>
+              <Unlock size={14} /> Segarkan sesi &amp; kirim
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="seg" style={{ marginTop: 12 }}>
+        <button className={`seg-btn ${tab === "antre" ? "on" : ""}`} onClick={() => setTab("antre")}>Menunggu ({pending.length})</button>
+        <button className={`seg-btn ${tab === "dead" ? "on" : ""}`} onClick={() => setTab("dead")}>Tertahan ({deadList.length})</button>
+      </div>
+
+      {tab === "dead" && deadList.length > 0 && (
+        <button className="btn ghost sm" style={{ marginTop: 10 }} onClick={onRetryDead}>
+          <Undo2 size={14} /> Kembalikan semua ke antrean &amp; kirim ulang
+        </button>
+      )}
+
+      <div className="diag-list">
+        {(!rows || rows.length === 0) && (
+          <div className="empty">{tab === "antre" ? "Antrean kosong — semua transaksi sudah masuk server." : "Tidak ada transaksi tertahan."}</div>
+        )}
+        {(rows || []).map((it, i) => (
+          <div key={it.clientId || i} className="diag-row">
+            <div className="diag-row-top">
+              <b>{it.rows?.[0]?.receipt_no || it.rows?.[0]?.txn_id || "—"}</b>
+              <span className="tab">{rp(outboxItemTotal(it))}</span>
+            </div>
+            <div className="muted">
+              {when(it.soldAt ? Date.parse(it.soldAt) : it.deadAt)} · {it.rows?.length || 0} baris
+              {it.rows?.[0]?.cashier ? ` · ${it.rows[0].cashier}` : ""}
+              {it.attempts ? ` · ${it.attempts}x dicoba` : ""}
+            </div>
+            {(it.lastError || it.deadReason) && <div className="diag-err">{it.deadReason || it.lastError}</div>}
+          </div>
+        ))}
+      </div>
+
+      <p className="muted" style={{ fontSize: 12, marginTop: 12 }}>
+        Data di daftar ini <b>hanya ada di perangkat ini</b> sampai berhasil terkirim. Jangan bersihkan
+        data browser, jangan berganti perangkat, dan jangan tutup shift sebelum angka “Menunggu kirim”
+        menjadi 0. Bila perangkat harus diganti: tekan <b>Unduh cadangan</b>, lalu <b>Pulihkan dari berkas</b> di perangkat baru.
+      </p>
+    </Modal>
+  );
+}
+
+// Peringatan penyelamat di layar LOGIN. Kalau sesi sempat hilang (mis. token
+// kedaluwarsa selagi offline), antrean transaksi jadi tidak terlihat sama sekali —
+// orang lalu mengira datanya hilang, padahal masih utuh di perangkat. Panel ini
+// memastikan hal itu ketahuan SEBELUM ada yang membersihkan data browser.
+function PendingRescue() {
+  const [n, setN] = useState(0);
+  const [d, setD] = useState(0);
+  useEffect(() => {
+    const read = () => { setN(loadOutbox().length); setD(loadDead().length); };
+    read();
+    const t = setInterval(read, 5000);
+    return () => clearInterval(t);
+  }, []);
+  if (!n && !d) return null;
+  return (
+    <div className="sync-banner pending" style={{ maxWidth: 420, margin: "0 auto 14px" }}>
+      <AlertTriangle size={16} />
+      <span>
+        <b>{n + d} transaksi belum terkirim</b> masih tersimpan di perangkat ini.
+        Login dengan akun yang sama — transaksi akan otomatis terkirim. Jangan bersihkan data browser.
+      </span>
+    </div>
+  );
 }
 
 function Receipt({ store, data }) {
@@ -1219,7 +1404,7 @@ export default function App() {
   };
   useEffect(() => {
     if (!hasSupabase || !session) return;
-    const onWake = () => { if (document.visibilityState === "visible") { refreshProducts(); flushOutbox(); flushCustbox(); } };
+    const onWake = () => { if (document.visibilityState === "visible") { refreshProducts(); refreshLedgers(); flushOutbox(); flushCustbox(); } };
     document.addEventListener("visibilitychange", onWake);
     window.addEventListener("focus", onWake);
     const t = setInterval(onWake, 120000);
@@ -1242,8 +1427,66 @@ export default function App() {
   const [deadCount, setDeadCount] = useState(deadRef.current.length);
   const flushingRef = useRef(false);
   const flushPromiseRef = useRef(null); // promise flush yang sedang berjalan (agar bisa di-await)
-  const persistOutbox = () => { saveOutbox(outboxRef.current); setPendingCount(outboxRef.current.length); };
+  const [syncDiag, setSyncDiag] = useState(loadDiag());   // hasil percobaan kirim terakhir (permanen di perangkat)
+  const [diagOpen, setDiagOpen] = useState(false);        // panel diagnostik terbuka?
+  // Daftar no. transaksi yang MASIH di antrean. Dipakai menandai baris di Riwayat
+  // dengan label "Belum tersinkron" — supaya "ada di perangkat tapi tidak ada di
+  // server" langsung kelihatan, bukan baru ketahuan berhari-hari kemudian.
+  const [pendingTxnIds, setPendingTxnIds] = useState(() => outboxTxnIds(loadOutbox()));
+  const [pendingList, setPendingList] = useState(() => outboxRef.current);
+  const [deadList, setDeadList] = useState(() => deadRef.current);
+  const noteDiag = (d) => { const rec = { at: Date.now(), ...d }; saveDiag(rec); setSyncDiag(rec); };
+  const persistOutbox = () => {
+    saveOutbox(outboxRef.current);
+    setPendingCount(outboxRef.current.length);
+    setPendingTxnIds(outboxTxnIds(outboxRef.current));
+    setPendingList(outboxRef.current);
+  };
   const enqueueTxn = (payload) => { outboxRef.current = [...outboxRef.current, payload]; persistOutbox(); flushOutbox(); };
+
+  // ===== ANTI LAYAR BASI UNTUK RIWAYAT & HUTANG =====
+  // Sebelumnya `salesLog` dan `debts` HANYA ditarik sekali saat login (loadAll) —
+  // penyegaran berkala hanya menyentuh daftar produk. Akibatnya komputer manajer
+  // yang dibiarkan terbuka TIDAK PERNAH menampilkan transaksi baru dari perangkat
+  // kasir, sebagus apa pun sinkronisasinya. Persis gejala "di device ada, di
+  // komputer tidak terdeteksi". Sekarang keduanya ikut disegarkan.
+  const salesLogRef = useRef([]);
+  const debtsRef = useRef([]);
+  const lastSalesRefreshRef = useRef(0);
+  useEffect(() => { salesLogRef.current = salesLog; }, [salesLog]);
+  useEffect(() => { debtsRef.current = debts; }, [debts]);
+
+  // Baris penjualan yang MASIH di antrean belum ada di server. Tanpa penggabungan
+  // ini, penyegaran akan menghapusnya dari layar — kasir akan mengira transaksinya
+  // hilang, padahal hanya belum terkirim. Baris lokal dipertahankan sampai
+  // benar-benar muncul di data server.
+  const mergeLocalSales = (serverList) => {
+    const pend = outboxTxnIds(outboxRef.current);
+    if (!pend.size) return serverList || [];
+    const onServer = new Set((serverList || []).map((s) => s.txnId));
+    const keep = salesLogRef.current.filter((s) => s.txnId && pend.has(s.txnId) && !onServer.has(s.txnId));
+    return [...keep, ...(serverList || [])];
+  };
+  const mergeLocalDebts = (serverList) => {
+    const pend = new Set(outboxRef.current.map((x) => x.localDebtId).filter(Boolean));
+    if (!pend.size) return serverList || [];
+    const onServer = new Set((serverList || []).map((d) => d.id));
+    const keep = debtsRef.current.filter((d) => pend.has(d.id) && !onServer.has(d.id));
+    return [...keep, ...(serverList || [])];
+  };
+
+  const refreshLedgers = async (force = false) => {
+    if (!hasSupabase || !session) return;
+    if (pendingSyncRef.current > 0) return;   // jangan menyela penulisan yang sedang jalan
+    const now = Date.now();
+    if (!force && now - lastSalesRefreshRef.current < 45000) return; // rem: maks 1x / 45 dtk
+    lastSalesRefreshRef.current = now;
+    try {
+      const [sl, dz] = await Promise.allSettled([Sales.list({ sinceDays: 90 }), DebtsApi.list()]);
+      if (sl.status === "fulfilled") setSalesLog(mergeLocalSales(sl.value));
+      if (dz.status === "fulfilled") setDebts(mergeLocalDebts(dz.value));
+    } catch (e) { console.error("[riwayat]", e); }
+  };
 
   // Kirim antrean ke server, PALING LAMA dulu, SATU per satu. Paket hanya dihapus
   // dari antrean SETELAH server memastikan tersimpan (ok) atau menyatakan sudah
@@ -1253,24 +1496,64 @@ export default function App() {
   // antrean benar-benar terkuras. Jika flush lain sedang jalan, promise itu yang
   // dikembalikan (tidak pernah menjalankan dua flush sekaligus).
   const flushOutbox = () => {
-    if (!hasSupabase || !session) return Promise.resolve();
+    if (!hasSupabase) return Promise.resolve();
     if (flushingRef.current) return flushPromiseRef.current || Promise.resolve();
     if (!outboxRef.current.length) return Promise.resolve();
-    // Catatan: sengaja TIDAK memakai navigator.onLine sebagai gerbang. Bila benar
-    // offline, permintaan gagal cepat lalu dicoba lagi; sebaliknya kalau onLine
-    // "macet-false" (bug perangkat), antrean tetap terkuras — bukan diam selamanya.
+    // PENTING: gerbang `session` (state React) DIHAPUS dari sini. Dulu, kalau token
+    // kedaluwarsa selagi perangkat offline, supabase-js menganggap sesi hilang →
+    // layar kembali ke Login → flushOutbox berhenti total → antrean terkurung di
+    // balik layar login dan tidak pernah terkirim walau internet sudah kembali.
+    // Sekarang sesi dicek langsung ke supabase (termasuk yang tersimpan di
+    // localStorage) di dalam proses kirim, bukan lewat state layar.
+    //
+    // Catatan lama yang tetap berlaku: sengaja TIDAK memakai navigator.onLine sebagai
+    // gerbang. Bila benar offline, permintaan gagal cepat lalu dicoba lagi; sebaliknya
+    // kalau onLine "macet-false" (bug perangkat), antrean tetap terkuras.
     flushingRef.current = true;
     setSyncing(true);
     const run = (async () => {
       let drained = 0;
       try {
+        // Sesi sungguhan (bukan state layar). Tanpa ini, RPC pasti ditolak 401.
+        let sess = null;
+        try { sess = await Auth.getSession(); } catch (e) { sess = null; }
+        if (!sess) { sess = await Auth.refresh(); }
+        if (!sess) {
+          noteDiag({ ok: false, stage: "auth", message: "Belum login di perangkat ini",
+            hint: "Antrean AMAN tersimpan. Login kembali dengan akun yang sama di perangkat ini, transaksi otomatis terkirim." });
+          return;
+        }
+        let authRetried = false; // hanya satu kali segarkan sesi per putaran flush
         while (outboxRef.current.length) {
           const item = outboxRef.current[0];
           let res;
           try {
             res = await Sales.syncTxn(item);
           } catch (e) {
-            if (isPermanentSyncError(e)) {
+            // TOKEN KEDALUWARSA selagi offline: segarkan sesi lalu ulangi paket YANG SAMA.
+            // Tanpa ini, setiap percobaan berikutnya memakai token mati juga — antrean
+            // "mencoba selamanya" tanpa pernah berhasil. Inilah penyebab paling umum
+            // transaksi offline tidak masuk walau internet sudah kembali.
+            if (isAuthError(e) && !authRetried) {
+              authRetried = true;
+              const fresh = await Auth.refresh();
+              if (fresh) {
+                noteDiag({ ok: true, stage: "auth", message: "Sesi disegarkan — melanjutkan pengiriman" });
+                continue; // ulangi paket yang sama dengan token baru
+              }
+              item.attempts = (item.attempts || 0) + 1;
+              item.lastError = "sesi kedaluwarsa";
+              persistOutbox();
+              noteDiag({ ok: false, stage: "auth", message: "Sesi kedaluwarsa dan gagal disegarkan",
+                hint: "Login ulang di perangkat ini dengan akun yang sama. Antrean tetap tersimpan dan akan terkirim otomatis setelah login.",
+                pending: outboxRef.current.length });
+              break;
+            }
+            // Karantina HANYA bila error benar-benar permanen DAN sudah dicoba berkali-kali.
+            // Pengaman ganda: kalaupun penggolongan error meleset, transaksi sah tidak
+            // langsung dibuang ke dead-letter pada kegagalan pertama.
+            item.attempts = (item.attempts || 0) + 1;
+            if (isPermanentSyncError(e) && item.attempts >= 3) {
               // DITOLAK PERMANEN server (mis. produk telah dihapus). Retry percuma dan
               // hanya memblokir paket lain di belakangnya. Pindah ke dead-letter
               // (tersimpan permanen + ditampilkan agar admin bisa memulihkan), lalu
@@ -1279,18 +1562,22 @@ export default function App() {
               item.deadReason = e?.message || "ditolak server";
               item.deadAt = Date.now();
               deadRef.current = [...deadRef.current, item];
-              saveDead(deadRef.current); setDeadCount(deadRef.current.length);
+              saveDead(deadRef.current); setDeadCount(deadRef.current.length); setDeadList(deadRef.current);
               outboxRef.current = outboxRef.current.slice(1);
               persistOutbox();
-              flash("1 transaksi tidak dapat disinkronkan (mungkin barang telah dihapus) — tersimpan untuk ditinjau admin.");
+              noteDiag({ ok: false, stage: "tolak", message: e?.message || "ditolak server",
+                code: e?.code || null, hint: "Buka Diagnostik Sinkronisasi → tab Ditolak untuk memulihkan transaksi ini." });
+              flash("1 transaksi tidak dapat disinkronkan — buka Diagnostik Sinkronisasi untuk memulihkannya.");
               continue;
             }
-            // Transien (koneksi putus/timeout): simpan jejak error, hentikan loop,
+            // Transien (koneksi putus/timeout/skema): simpan jejak error, hentikan loop,
             // pertahankan SELURUH antrean apa adanya untuk percobaan berikutnya.
             console.error("[outbox]", e);
-            item.attempts = (item.attempts || 0) + 1;
             item.lastError = e?.message || "gagal";
+            item.lastTryAt = Date.now();
             persistOutbox();
+            noteDiag({ ok: false, stage: "kirim", message: e?.message || "gagal terkirim",
+              code: e?.code || null, hint: syncErrorHint(e), pending: outboxRef.current.length });
             break;
           }
           // Berhasil / duplikat → paket ini selesai, keluarkan dari kepala antrean.
@@ -1305,12 +1592,23 @@ export default function App() {
             setDebts((ds) => ds.map((d) => (d.id === item.localDebtId ? { ...d, id: res.debt_id } : d)));
           }
         }
+        if (drained > 0) {
+          noteDiag({ ok: true, stage: "kirim", message: `${drained} transaksi berhasil terkirim ke server`,
+            pending: outboxRef.current.length });
+        }
+      } catch (e) {
+        // Jaring pengaman: error tak terduga (mis. bug) TIDAK boleh membuat
+        // flushingRef tersangkut sehingga antrean berhenti selamanya.
+        console.error("[outbox:fatal]", e);
+        noteDiag({ ok: false, stage: "internal", message: e?.message || "kesalahan tak terduga",
+          hint: "Muat ulang aplikasi (Ctrl+Shift+R). Antrean tetap tersimpan di perangkat." });
       } finally {
         flushingRef.current = false;
         setSyncing(false);
         flushPromiseRef.current = null;
         if (drained > 0) {
           refreshProducts(true); // ada yang terkirim → tarik stok terbaru
+          refreshLedgers(true);  // riwayat & hutang resmi dari server
           // Titipan yang laku saat offline baru dibuat server ketika sinkron; tarik
           // ulang agar kewajiban setor ke distributor langsung tampak.
           Consign.list().then((cg) => setConsigns(cg)).catch(() => {});
@@ -1321,6 +1619,93 @@ export default function App() {
     flushPromiseRef.current = run;
     return run;
   };
+
+  // ===== PEMULIHAN: kembalikan paket yang dikarantina ke antrean utama =====
+  // Sebelumnya dead-letter hanya bisa DISALIN, tidak ada jalan pulang — artinya
+  // transaksi yang salah dikarantina praktis hilang. Sekarang bisa dikirim ulang:
+  // aman karena server tetap menolak client_id yang sudah pernah masuk (idempoten).
+  const retryDead = () => {
+    if (!deadRef.current.length) return;
+    const back = deadRef.current.map((d) => { const { deadReason, deadAt, ...rest } = d; return { ...rest, attempts: 0 }; });
+    const seen = new Set(outboxRef.current.map((x) => x.clientId));
+    outboxRef.current = [...outboxRef.current, ...back.filter((b) => !seen.has(b.clientId))];
+    deadRef.current = []; saveDead([]); setDeadCount(0); setDeadList([]);
+    persistOutbox();
+    flash(`${back.length} transaksi dikembalikan ke antrean — mencoba kirim…`);
+    flushOutbox();
+  };
+
+  // ===== CADANGAN ANTREAN: unduh berkas .json =====
+  // Jaring pengaman terakhir. Kalau satu perangkat rusak/hilang/di-reset, berkas ini
+  // bisa dibuka di perangkat lain (menu yang sama → Pulihkan dari berkas) sehingga
+  // transaksi tetap masuk ke server. Tanpa ini, data hanya ada di satu tablet.
+  const exportQueue = () => {
+    const payload = {
+      app: "conflux", kind: "outbox-backup", v: 1, at: new Date().toISOString(),
+      pending: outboxRef.current, dead: deadRef.current, custbox: custboxRef.current,
+    };
+    const txt = JSON.stringify(payload, null, 2);
+    try {
+      const blob = new Blob([txt], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const d = new Date(); const p2 = (n) => String(n).padStart(2, "0");
+      a.href = url;
+      a.download = `conflux-antrean-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}.json`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      flash("Cadangan antrean diunduh — simpan berkasnya sampai transaksi masuk server.");
+    } catch (e) {
+      console.log(txt);
+      flash("Gagal mengunduh — data dicetak di console (F12), salin dari sana.");
+    }
+  };
+
+  // ===== PULIHKAN ANTREAN dari berkas cadangan (perangkat lain) =====
+  // Digabung berdasarkan clientId sehingga memuat berkas yang sama dua kali TIDAK
+  // menggandakan apa pun; server pun tetap menolak client_id yang sudah tersimpan.
+  const importQueue = async (file) => {
+    try {
+      const txt = await file.text();
+      const o = JSON.parse(txt);
+      const list = [...(Array.isArray(o?.pending) ? o.pending : []), ...(Array.isArray(o?.dead) ? o.dead : [])]
+        .filter((x) => x && typeof x.clientId === "string" && Array.isArray(x.rows) && x.rows.length)
+        .map((x) => { const { deadReason, deadAt, ...rest } = x; return { ...rest, attempts: 0 }; });
+      if (!list.length) { flash("Berkas tidak berisi transaksi antrean yang sah."); return; }
+      const seen = new Set(outboxRef.current.map((x) => x.clientId));
+      const add = list.filter((x) => !seen.has(x.clientId));
+      outboxRef.current = [...outboxRef.current, ...add];
+      persistOutbox();
+      flash(add.length ? `${add.length} transaksi dipulihkan — mencoba kirim…` : "Semua transaksi di berkas sudah ada di antrean.");
+      flushOutbox();
+    } catch (e) {
+      console.error("[impor]", e);
+      flash("Berkas tidak bisa dibaca — pastikan memilih berkas cadangan antrean (.json).");
+    }
+  };
+
+  // Segarkan sesi lalu kirim ulang — tombol darurat saat token kedaluwarsa.
+  const refreshAndFlush = async () => {
+    const s = await Auth.refresh();
+    if (s) { setSession(s); flash("Sesi disegarkan — mengirim antrean…"); }
+    else flash("Sesi tidak bisa disegarkan — silakan login ulang di perangkat ini.");
+    return flushOutbox();
+  };
+
+  // ===== PENDORONG ANTREAN YANG TIDAK BERGANTUNG PADA STATE LAYAR =====
+  // Berjalan SELALU (termasuk saat layar sedang menampilkan Login atau gerbang shift),
+  // selama masih ada isi antrean. Ini menutup lubang lama: kalau sesi sempat dianggap
+  // hilang, seluruh pemicu sinkronisasi ikut mati bersama layar utamanya.
+  useEffect(() => {
+    if (!hasSupabase) return;
+    const tick = () => { if (outboxRef.current.length || custboxRef.current.length) { flushOutbox(); flushCustbox(); } };
+    const t = setInterval(tick, 15000);
+    const onNet = () => { setOnline(navigator.onLine !== false); tick(); };
+    window.addEventListener("online", onNet);
+    window.addEventListener("pageshow", tick);
+    tick();
+    return () => { clearInterval(t); window.removeEventListener("online", onNet); window.removeEventListener("pageshow", tick); };
+  }, []);
 
   // ===== Antrean pencatatan pelanggan (terpisah dari antrean penjualan) =====
   const custboxRef = useRef(loadCustbox());
@@ -2084,7 +2469,7 @@ export default function App() {
     }
     // Online: autentikasi sungguhan
     if (!authReady) return (<><Style /><AuthSplash /></>);
-    if (!session) return (<><Style /><Login flash={flash} /></>);
+    if (!session) return (<><Style /><PendingRescue /><Login flash={flash} /></>);
     if (profileRole === "cashier") {
       return (
         <>
@@ -2170,16 +2555,16 @@ export default function App() {
 
         <div className="content">
           <SyncBanner
-            online={online} syncing={syncing} pending={pendingCount} dead={deadCount}
+            online={online} syncing={syncing} pending={pendingCount} dead={deadCount} diag={syncDiag}
             onRetry={flushOutbox}
-            onCopyDead={() => {
-              const txt = JSON.stringify(deadRef.current, null, 2);
-              const done = () => flash("Data transaksi gagal disalin ke clipboard — tempel & kirim ke admin.");
-              try {
-                if (navigator?.clipboard?.writeText) navigator.clipboard.writeText(txt).then(done).catch(() => { console.log(txt); flash("Tidak bisa menyalin otomatis — data dicetak di console (F12)."); });
-                else { console.log(txt); flash("Data dicetak di console (F12) — salin dari sana."); }
-              } catch (e) { console.log(txt); flash("Data dicetak di console (F12) — salin dari sana."); }
-            }}
+            onOpenDiag={() => setDiagOpen(true)}
+          />
+          <SyncDiagModal
+            open={diagOpen} onClose={() => setDiagOpen(false)}
+            pending={pendingList} deadList={deadList} diag={syncDiag}
+            online={online} syncing={syncing}
+            onRetry={flushOutbox} onRefreshAuth={refreshAndFlush} onRetryDead={retryDead}
+            onExport={exportQueue} onImport={importQueue}
           />
           {view === "dashboard" && (
             <Dashboard
@@ -2192,7 +2577,7 @@ export default function App() {
             <SalesHistory
               salesLog={salesLog} products={products} managerMode={managerMode}
               onPrint={(t) => triggerPrint(txnToReceipt(t))}
-              onVoid={voidTxn}
+              onVoid={voidTxn} pendingTxnIds={pendingTxnIds}
             />
           )}
           {view === "retur" && (
@@ -2601,7 +2986,7 @@ function Dashboard({ products, chart, todayRev, deltaPct, lowStock, inventoryVal
 
 /* ============================ Riwayat Penjualan ============================ */
 
-function SalesHistory({ salesLog, products, managerMode, onPrint, onVoid }) {
+function SalesHistory({ salesLog, products, managerMode, onPrint, onVoid, pendingTxnIds }) {
   const [range, setRange] = useState("today"); // today | all
   const [q, setQ] = useState("");
   const [open, setOpen] = useState({});
@@ -2706,7 +3091,10 @@ function SalesHistory({ salesLog, products, managerMode, onPrint, onVoid }) {
               <div className="txn-head" role="button" tabIndex={0}
                 onClick={() => setOpen((o) => ({ ...o, [t.txnId]: !o[t.txnId] }))}
                 onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setOpen((o) => ({ ...o, [t.txnId]: !o[t.txnId] })); }}>
-                <div className="txn-time">{fmtTime(t.ts)} <span className="txn-no">{t.no}</span></div>
+                <div className="txn-time">
+                  {fmtTime(t.ts)} <span className="txn-no">{t.no}</span>
+                  {pendingTxnIds?.has?.(t.txnId) && <span className="txn-unsynced" title="Masih tersimpan di perangkat, belum masuk server">Belum tersinkron</span>}
+                </div>
                 <div className="txn-cashier"><User size={12} /> {t.cashier}</div>
                 <div className={`txn-method m-${t.method}`}>{PAY_LABEL[t.method] || t.method}</div>
                 <div className="txn-qty">{t.qty} brg</div>
@@ -7882,6 +8270,24 @@ function Style() {
       .sync-retry:hover{background:rgba(255,255,255,.16)}
       .spin{animation:spin 1s linear infinite}
       @keyframes spin{to{transform:rotate(360deg)}}
+
+      /* ===== Panel diagnostik sinkronisasi ===== */
+      .diag-state{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:12px}
+      .diag-state>div{display:flex;flex-direction:column;gap:2px;background:rgba(255,255,255,.04);
+        border:1px solid var(--line);border-radius:11px;padding:9px 12px}
+      .diag-state span{font-size:11.5px}
+      .diag-state b{font-size:14.5px;font-weight:700}
+      .diag-note{border-radius:12px;padding:11px 13px;font-size:13px;border:1px solid var(--line);line-height:1.5}
+      .diag-note.ok{background:rgba(56,161,105,.12);border-color:rgba(56,161,105,.38);color:#9fd9b4}
+      .diag-note.bad{background:rgba(224,90,90,.12);border-color:rgba(224,90,90,.42);color:#f0a8a8}
+      .diag-note .muted{color:inherit;opacity:.78}
+      .diag-list{margin-top:10px;display:flex;flex-direction:column;gap:8px;max-height:290px;overflow-y:auto}
+      .diag-row{border:1px solid var(--line);border-radius:11px;padding:9px 12px;background:rgba(255,255,255,.03)}
+      .diag-row-top{display:flex;align-items:center;gap:8px;font-size:13.5px}
+      .diag-row .muted{font-size:12px;margin-top:2px}
+      .diag-err{margin-top:5px;font-size:12px;color:#f0a0a0;word-break:break-word}
+      .txn-unsynced{margin-left:7px;background:rgba(214,158,46,.18);border:1px solid rgba(214,158,46,.45);
+        color:#e8c887;border-radius:999px;padding:1px 8px;font-size:10.5px;font-weight:700;white-space:nowrap}
 
       /* toast */
       .toast{position:fixed;top:20px;right:20px;background:rgba(27,37,33,.78);color:var(--ink);
