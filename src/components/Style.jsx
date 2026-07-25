@@ -720,9 +720,12 @@ function Style() {
       .debt-line b{color:var(--ink);font-weight:600}
       .debt-items{display:flex;flex-direction:column;gap:7px;padding:11px 0;border-top:1px solid var(--line-soft);border-bottom:1px solid var(--line-soft)}
       .debt-item{display:flex;justify-content:space-between;gap:10px;font-size:12.5px}
-      .debt-foot{display:flex;justify-content:space-between;align-items:center}
+      .debt-foot{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
       .debt-total{display:flex;flex-direction:column}
       .debt-total .tab{font-family:'Space Grotesk';font-weight:700;font-size:16px}
+      .pdf-busy{display:flex;align-items:center;gap:9px;color:var(--ink-soft);font-size:13.5px;padding:6px 0}
+      .pdf-ready{display:flex;align-items:center;gap:9px;color:var(--ink);font-size:14px}
+      .pdf-ready b{font-family:'Space Grotesk';font-weight:600;word-break:break-all}
 
       /* restock */
       .formula-card{display:flex;gap:15px;align-items:flex-start;background:linear-gradient(180deg,var(--accent-soft),var(--surface))}
@@ -795,7 +798,7 @@ function Style() {
       @media(max-width:560px){ .toast{top:14px;right:14px;left:14px;justify-content:center} }
 
       /* ===== Nota / receipt ===== */
-      .debt-actions{display:flex;align-items:center;gap:8px}
+      .debt-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
       .receipt-preview{display:flex;justify-content:center;background:#cfcabb;padding:14px;border-radius:10px}
       .receipt{font-family:'Courier New',ui-monospace,monospace;color:#111;background:#fff;width:256px;
         padding:14px 14px;font-size:12px;line-height:1.5;box-shadow:0 4px 14px rgba(0,0,0,.25)}

@@ -1544,7 +1544,7 @@ export default function App() {
           )}
           {view === "hutang" && (
             <Debts debts={debts} onSettle={settleDebt} onPrint={(d) => triggerPrint(debtToReceipt(d))}
-              onDelete={managerMode ? deleteDebt : null} />
+              onDelete={managerMode ? deleteDebt : null} store={store} flash={flash} />
           )}
           {view === "pelanggan" && (
             <CustomersView
