@@ -909,26 +909,69 @@ function Style() {
       .logout-btn:hover{background:rgba(236,231,218,.07);color:var(--ink)}
       @media(max-width:420px){ .gate-roles{grid-template-columns:1fr} }
 
-      /* responsive */
+      /* ============================ RESPONSIVE ============================
+         Model tampilan:
+         • Perangkat sentuh (tablet/HP) ATAU jendela ≤1024px → sidebar menjadi
+           laci geser (drawer) + tombol hamburger; sasaran ketuk diperbesar; dan
+           font kolom isian dipaksa 16px agar Safari iOS TIDAK auto-zoom halaman
+           saat kolom difokus (penyebab utama harus "zoom in/zoom out" di tablet).
+         • Lebar ≤980px → POS & grid ringkasan turun ke 1 kolom (murni soal ruang).
+         Desktop layar besar + mouse (>1024px) TIDAK berubah sama sekali. */
       .only-mobile{display:none}
       .drawer-scrim{display:none}
-      @media(max-width:980px){
+
+      /* -- Sidebar → laci geser + hamburger: semua perangkat sentuh & jendela sempit -- */
+      @media (pointer:coarse),(max-width:1024px){
+        .sidebar{position:fixed;left:0;top:0;z-index:60;transform:translateX(-100%);
+          transition:transform .25s var(--ease);box-shadow:0 0 44px rgba(0,0,0,.4)}
+        .sidebar.open{transform:translateX(0)}
+        .drawer-scrim{display:block;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:55}
+        .only-mobile{display:grid}
+        .topbar{padding:0 16px}
+        .content{padding:18px 16px}
+      }
+
+      /* -- Anti auto-zoom iOS + sasaran ketuk lebih besar (utamanya layar kasir) -- */
+      @media (pointer:coarse),(max-width:1024px){
+        /* Font ≥16px pada SEMUA kolom isian: Safari iOS berhenti memperbesar
+           halaman tiap kali kolom difokus. !important dipakai agar menang atas
+           aturan yang lebih spesifik seperti .search.sm input, .split-select, dll. */
+        input,select,textarea{font-size:16px !important}
+        .pos-card{padding:15px}
+        .add-btn{min-height:48px;font-size:13.5px}
+        .pay-method{padding:12px 5px}
+        .cat-tab{padding:11px 17px;font-size:14px}
+        .quick-pay button{padding:12px 6px;font-size:13.5px}
+        .stepper.sm button{width:38px;height:38px}
+        .stepper.sm span{min-width:34px;font-size:16px}
+        .split-fill{padding:11px 10px}
+        .btn{padding:12px 18px}
+        .btn.sm{padding:10px 14px}
+        .btn.pay{padding:15px;font-size:16px}
+        .icon-btn{padding:9px}
+        .cust-hit{padding:10px 11px}
+        .cust-kind-btn{padding:11px 12px}
+        .mini{padding:8px 12px}
+        .chip,.set-tab,.ret-pill{padding:9px 15px}
+      }
+
+      /* -- Ruang: POS & grid ringkasan ke 1 kolom (murni soal lebar) -- */
+      @media (max-width:980px){
         .grid-4{grid-template-columns:repeat(2,1fr)}
         .grid-2-1{grid-template-columns:1fr}
         .pos{grid-template-columns:1fr;height:auto}
         .restock-card{grid-template-columns:1fr}
         .rop-meta{grid-template-columns:repeat(2,1fr)}
       }
-      @media(max-width:760px){
-        .sidebar{position:fixed;left:0;top:0;z-index:60;transform:translateX(-100%);transition:.25s;box-shadow:0 0 40px rgba(0,0,0,.2)}
-        .sidebar.open{transform:translateX(0)}
-        .drawer-scrim{display:block;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:55}
-        .only-mobile{display:grid}
-        .content{padding:18px}
+      @media (max-width:760px){
         .grid-4{grid-template-columns:1fr}
         .alert-chip span{display:none}
         .ret-manual-row{flex-wrap:wrap}
         .ret-methods{grid-template-columns:repeat(2,1fr)}
+      }
+      /* -- HP kecil: cegah grid kartu (min 290–300px) meluber & memunculkan scroll -- */
+      @media (max-width:600px){
+        .order-grid,.slog-list{grid-template-columns:1fr}
       }
 
       /* ===== Retur & Tukar ===== */
