@@ -61,6 +61,11 @@ function Style() {
         background:linear-gradient(180deg,#FBF8F0,#CFC7B6);-webkit-background-clip:text;background-clip:text;color:transparent}
       .brand-sub{font-size:10.5px;color:var(--ink-faint);font-weight:500;letter-spacing:.14em;margin-top:4px;text-transform:uppercase}
       .nav{display:flex;flex-direction:column;gap:3px;flex:1}
+      .nav-group{display:flex;flex-direction:column;gap:3px}
+      .nav-group-title{font-size:10px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;
+        color:var(--ink-faint);padding:15px 11px 5px;line-height:1;user-select:none;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .nav-group:first-child .nav-group-title{padding-top:3px}
       .nav-item{display:flex;align-items:center;gap:11px;padding:10px 11px;border:none;background:none;
         border-radius:var(--r-sm);font:inherit;font-size:14px;font-weight:500;color:rgba(236,231,218,.72);cursor:pointer;
         width:100%;text-align:left;transition:background .15s,color .15s,transform .12s var(--ease);position:relative}

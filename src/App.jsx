@@ -9,7 +9,7 @@ import { Style } from "./components/Style";
 import { PendingRescue, SyncBanner, SyncDiagModal } from "./components/SyncUI";
 import { Modal, Toast } from "./components/ui";
 import { DEFAULT_STORE, cfgNota, cfgSistem, cfgStok, invoiceNo, normStore, setCfg } from "./lib/config";
-import { MANAGER_PIN, NAV, PAY_LABEL, RETURN_REASON_LABEL, payListLabel } from "./lib/constants";
+import { MANAGER_PIN, NAV, NAV_GROUPS, PAY_LABEL, RETURN_REASON_LABEL, payListLabel } from "./lib/constants";
 import { custKey } from "./lib/customers";
 import { loadDevice, saveDevice } from "./lib/device";
 import { num, printProfile, rp, uid } from "./lib/format";
@@ -1045,18 +1045,35 @@ export default function App() {
     const initialStock = Number(data.stock) || 0;
     if (hasSupabase) {
       beginSync(); // pagar: tarikan daftar produk yang menyela bisa belum memuat barang baru
+      // 1) Buat barang di katalog dulu (stok awal dicatat terpisah sebagai batch FIFO).
+      let row;
       try {
-        // Buat produk tanpa stok, lalu stok awal dicatat sebagai batch FIFO pertama
-        const row = await Products.create({ code, ...data, stock: 0 });
-        if (initialStock > 0) {
-          // ATOMIK: riwayat "Stok awal" + batch FIFO + kolom stok dalam satu transaksi
-          await Products.stockIn(row.id, initialStock, Number(data.cost) || 0, "Stok awal");
-        }
-        setProducts((ps) => [{ ...row, stock: initialStock }, ...ps]);
-        flash(`Barang ${code} ditambahkan`);
+        row = await Products.create({ code, ...data, stock: 0 });
+      } catch (e) {
+        console.error("[sync]", e);
+        endSync();
+        // Bila SERVER menolak (mis. akun kasir belum diberi izin menambah barang),
+        // beri pesan yang jelas & bisa ditindaklanjuti — bukan galat mentah.
+        const denied = e?.code === "42501" || /permission|policy|row-level|not allowed|denied|forbidden/i.test(e?.message || "");
+        flash(denied
+          ? "Akun ini belum diizinkan menambah barang baru di server — hubungi manajer untuk mengaktifkannya."
+          : `Gagal menambah barang — ${e?.message || "cek koneksi"}`);
         return;
-      } catch (e) { console.error("[sync]", e); flash("Gagal simpan ke server"); }
-      finally { endSync(); }
+      }
+      // 2) Stok awal → batch FIFO pertama (atomik di server). Bila langkah ini gagal,
+      // barang TETAP sudah dibuat: tampilkan apa adanya (stok 0) supaya layar = server,
+      // dan arahkan mengisi stok lewat tombol "Masuk".
+      let stockOk = true;
+      if (initialStock > 0) {
+        try { await Products.stockIn(row.id, initialStock, Number(data.cost) || 0, "Stok awal"); }
+        catch (e) { console.error("[sync]", e); stockOk = false; }
+      }
+      setProducts((ps) => [{ ...row, stock: stockOk ? initialStock : 0 }, ...ps]);
+      endSync();
+      flash(stockOk
+        ? `Barang ${code} ditambahkan`
+        : `Barang ${code} dibuat, tapi stok awal gagal dicatat — buka tombol "Masuk" untuk mengisi stoknya`);
+      return;
     }
     setProducts((ps) => [{ id: uid(), code, ...data }, ...ps]);
     flash(`Barang ${code} ditambahkan`);
@@ -1371,20 +1388,32 @@ export default function App() {
         </div>
 
         <nav className="nav">
-          {NAV.filter((n) => n.roles.includes(role)).map((n) => {
-            const Icon = n.icon;
-            const active = view === n.key;
-            const badge = n.key === "order" ? newOrders : n.key === "restok" ? lowStock.length : n.key === "hutang" ? unpaidDebts : 0;
+          {NAV_GROUPS.map((group) => {
+            // Item yang boleh dilihat peran saat ini. Grup tanpa item apa pun
+            // (mis. grup khusus manajer saat login sebagai kasir) tidak dirender —
+            // termasuk judulnya — agar sidebar tetap ringkas.
+            const items = group.items.filter((n) => n.roles.includes(role));
+            if (items.length === 0) return null;
             return (
-              <button
-                key={n.key}
-                className={`nav-item ${active ? "active" : ""}`}
-                onClick={() => { setView(n.key); setSidebarOpen(false); }}
-              >
-                <Icon size={18} strokeWidth={2} />
-                <span>{n.label}</span>
-                {badge > 0 && <span className="nav-badge">{badge}</span>}
-              </button>
+              <div key={group.title} className="nav-group">
+                <div className="nav-group-title">{group.title}</div>
+                {items.map((n) => {
+                  const Icon = n.icon;
+                  const active = view === n.key;
+                  const badge = n.key === "order" ? newOrders : n.key === "restok" ? lowStock.length : n.key === "hutang" ? unpaidDebts : 0;
+                  return (
+                    <button
+                      key={n.key}
+                      className={`nav-item ${active ? "active" : ""}`}
+                      onClick={() => { setView(n.key); setSidebarOpen(false); }}
+                    >
+                      <Icon size={18} strokeWidth={2} />
+                      <span>{n.label}</span>
+                      {badge > 0 && <span className="nav-badge">{badge}</span>}
+                    </button>
+                  );
+                })}
+              </div>
             );
           })}
         </nav>
@@ -1458,7 +1487,7 @@ export default function App() {
           )}
           {view === "shiftlog" && managerMode && <ShiftLog flash={flash} />}
           {view === "stok" && (
-            <Inventory products={products} movements={movements} pById={pById}
+            <Inventory products={products} movements={movements} pById={pById} managerMode={managerMode}
               onMove={(pid, type, qty, note, cost, expiry) => { recordMovement(pid, type, qty, note, cost, expiry); flash(`Stok ${type === "in" ? "masuk" : "keluar"} dicatat`); }}
               onAdd={addProduct} onUpdate={updateProduct} onDelete={deleteProduct}
               onStockChange={(pid, newStock) => setProducts((ps) => ps.map((p) => (p.id === pid ? { ...p, stock: newStock } : p)))}

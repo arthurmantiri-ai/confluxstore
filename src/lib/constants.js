@@ -1,22 +1,64 @@
 import { Banknote, Bean, Calculator, ClipboardList, Clock, Coffee, Coins, CreditCard, CupSoda, Droplets, Globe, Handshake, History, Landmark, LayoutDashboard, LineChart, Package, QrCode, RefreshCcw, Settings, ShoppingCart, Undo2, Users, Wallet } from "lucide-react";
 import { rp } from "./format";
 
-const NAV = [
-  { key: "dashboard", label: "Dashboard", icon: LayoutDashboard, roles: ["manager"] },
-  { key: "stok", label: "Stok Barang", icon: Package, roles: ["manager"] },
-  { key: "kasir", label: "Kasir", icon: ShoppingCart, roles: ["cashier", "manager"] },
-  { key: "order", label: "Order Online", icon: Globe, roles: ["cashier", "manager"] },
-  { key: "hutang", label: "Hutang", icon: ClipboardList, roles: ["cashier", "manager"] },
-  { key: "pelanggan", label: "Data Customer", icon: Users, roles: ["cashier", "manager"] },
-  { key: "restok", label: "Re-stok", icon: RefreshCcw, roles: ["manager"] },
-  { key: "titipjual", label: "Titip Jual", icon: Handshake, roles: ["manager"] },
-  { key: "simulasi", label: "Simulasi Stok", icon: Calculator, roles: ["manager"] },
-  { key: "akuntansi", label: "Akuntansi", icon: LineChart, roles: ["manager"] },
-  { key: "riwayat", label: "Riwayat Penjualan", icon: History, roles: ["cashier", "manager"] },
-  { key: "retur", label: "Retur & Tukar", icon: Undo2, roles: ["cashier", "manager"] },
-  { key: "shiftlog", label: "Shift Kasir", icon: Wallet, roles: ["manager"] },
-  { key: "pengaturan", label: "Pengaturan", icon: Settings, roles: ["manager"] },
+// ===== Navigasi sidebar (dikelompokkan per kategori) =====
+// Menu dikelompokkan agar rapi & mudah dipindai — terutama di mode manajer yang
+// itemnya banyak. Tiap grup hanya muncul bila ADA minimal satu item yang boleh
+// dilihat peran saat ini (grup yang seluruh itemnya manajer otomatis hilang di
+// tampilan kasir). Urutan grup mengikuti alur kerja harian: ringkasan → jualan →
+// stok → pelanggan/piutang → keuangan → sistem.
+const NAV_GROUPS = [
+  {
+    title: "Ringkasan",
+    items: [
+      { key: "dashboard", label: "Dashboard", icon: LayoutDashboard, roles: ["manager"] },
+    ],
+  },
+  {
+    title: "Penjualan",
+    items: [
+      { key: "kasir", label: "Kasir", icon: ShoppingCart, roles: ["cashier", "manager"] },
+      { key: "order", label: "Order Online", icon: Globe, roles: ["cashier", "manager"] },
+      { key: "retur", label: "Retur & Tukar", icon: Undo2, roles: ["cashier", "manager"] },
+      { key: "riwayat", label: "Riwayat Penjualan", icon: History, roles: ["cashier", "manager"] },
+    ],
+  },
+  {
+    title: "Inventaris",
+    items: [
+      // Stok Barang kini boleh diakses kasir — untuk mencatat barang MASUK
+      // (barang baru & re-stok barang lama). Aksi sensitif (ubah harga, hapus,
+      // kelola batch, stok keluar) tetap khusus manajer, dijaga di halaman itu.
+      { key: "stok", label: "Stok Barang", icon: Package, roles: ["cashier", "manager"] },
+      { key: "restok", label: "Re-stok", icon: RefreshCcw, roles: ["manager"] },
+      { key: "simulasi", label: "Simulasi Stok", icon: Calculator, roles: ["manager"] },
+      { key: "titipjual", label: "Titip Jual", icon: Handshake, roles: ["manager"] },
+    ],
+  },
+  {
+    title: "Pelanggan & Piutang",
+    items: [
+      { key: "pelanggan", label: "Data Customer", icon: Users, roles: ["cashier", "manager"] },
+      { key: "hutang", label: "Hutang", icon: ClipboardList, roles: ["cashier", "manager"] },
+    ],
+  },
+  {
+    title: "Keuangan",
+    items: [
+      { key: "akuntansi", label: "Akuntansi", icon: LineChart, roles: ["manager"] },
+      { key: "shiftlog", label: "Shift Kasir", icon: Wallet, roles: ["manager"] },
+    ],
+  },
+  {
+    title: "Sistem",
+    items: [
+      { key: "pengaturan", label: "Pengaturan", icon: Settings, roles: ["manager"] },
+    ],
+  },
 ];
+
+// Daftar datar semua item (untuk cari label judul halaman berdasar `key`, dsb.)
+const NAV = NAV_GROUPS.flatMap((g) => g.items);
 
 const PAY_METHODS = [
   { key: "cash", label: "Tunai", icon: Banknote },
@@ -67,6 +109,7 @@ const MANAGER_PIN = "1234";
 export {
   MANAGER_PIN,
   NAV,
+  NAV_GROUPS,
   PAY_LABEL,
   PAY_METHODS,
   REFUND_METHODS,

@@ -10,7 +10,7 @@ import { ProductForm } from "./ProductForm";
 
 /* ============================ Inventory / Stok ============================ */
 
-function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDelete, onStockChange, onFlash }) {
+function Inventory({ products, movements, pById, managerMode = true, onMove, onAdd, onUpdate, onDelete, onStockChange, onFlash }) {
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState("all");
   const [exportingXlsx, setExportingXlsx] = useState(false); // sedang membuat file Excel stok & harga
@@ -183,7 +183,9 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
     return okQ && okF;
   });
 
-  const openMove = (p, type) => { setMoveFor(p); setMoveType(type); setQty(1); setBuyCost(p.cost || 0); setBuyExpiry(""); setNote(type === "in" ? (p.isConsign ? "Terima barang titipan" : "Pembelian supplier") : "Penyesuaian"); };
+  // Kasir hanya boleh mencatat stok MASUK. Apa pun pemicunya, paksa "in" bila bukan
+  // manajer (pertahanan berlapis di samping tombol "Keluar" yang memang disembunyikan).
+  const openMove = (p, type) => { const t = managerMode ? type : "in"; setMoveFor(p); setMoveType(t); setQty(1); setBuyCost(p.cost || 0); setBuyExpiry(""); setNote(t === "in" ? (p.isConsign ? "Terima barang titipan" : "Pembelian supplier") : "Penyesuaian"); };
   const submitMove = () => { onMove(moveFor.id, moveType, Number(qty) || 0, note, moveType === "in" ? (Number(buyCost) || 0) : undefined, moveType === "in" ? (buyExpiry || null) : undefined); setMoveFor(null); };
 
   // ============ Export "Daftar Stok & Harga" (kirim ke coffee shop) ============
@@ -387,10 +389,12 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
             </button>
           )}
         </div>
-        <button className="btn ghost" onClick={exportStokHarga} disabled={exportingXlsx || !list.length}
-          title="Unduh daftar stok & harga (Excel) untuk dikirim ke coffee shop">
-          <Download size={16} /> {exportingXlsx ? "Menyiapkan…" : "Export Stok & Harga"}
-        </button>
+        {managerMode && (
+          <button className="btn ghost" onClick={exportStokHarga} disabled={exportingXlsx || !list.length}
+            title="Unduh daftar stok & harga (Excel) untuk dikirim ke coffee shop">
+            <Download size={16} /> {exportingXlsx ? "Menyiapkan…" : "Export Stok & Harga"}
+          </button>
+        )}
         <button className="btn" onClick={() => setFormFor({})}><Plus size={16} /> Tambah Barang</button>
       </div>
 
@@ -434,11 +438,17 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
                 <td className="r">
                   <div className="row-actions">
                     <button className="mini in" onClick={() => openMove(p, "in")}><Plus size={14} /> Masuk</button>
-                    <button className="mini out" onClick={() => openMove(p, "out")}><Minus size={14} /> Keluar</button>
-                    <span className="act-div" />
-                    {hasSupabase && <button className="icon-btn xs" title="Kelola batch" onClick={() => openBatch(p)}><Boxes size={15} /></button>}
-                    <button className="icon-btn xs" title="Edit barang" onClick={() => setFormFor(p)}><Pencil size={15} /></button>
-                    <button className="icon-btn xs danger-h" title="Hapus barang" onClick={() => setDelFor(p)}><Trash2 size={15} /></button>
+                    {/* Aksi berikut khusus manajer: stok keluar (penyesuaian), kelola batch,
+                        ubah data barang, dan hapus. Kasir hanya mencatat barang MASUK. */}
+                    {managerMode && (
+                      <>
+                        <button className="mini out" onClick={() => openMove(p, "out")}><Minus size={14} /> Keluar</button>
+                        <span className="act-div" />
+                        {hasSupabase && <button className="icon-btn xs" title="Kelola batch" onClick={() => openBatch(p)}><Boxes size={15} /></button>}
+                        <button className="icon-btn xs" title="Edit barang" onClick={() => setFormFor(p)}><Pencil size={15} /></button>
+                        <button className="icon-btn xs danger-h" title="Hapus barang" onClick={() => setDelFor(p)}><Trash2 size={15} /></button>
+                      </>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -465,10 +475,12 @@ function Inventory({ products, movements, pById, onMove, onAdd, onUpdate, onDele
               <span>{moveFor.name}</span>
               <span className="muted">Stok saat ini: {num(moveFor.stock)}</span>
             </div>
-            <div className="seg">
-              <button className={moveType === "in" ? "on" : ""} onClick={() => setMoveType("in")}>Masuk</button>
-              <button className={moveType === "out" ? "on" : ""} onClick={() => setMoveType("out")}>Keluar</button>
-            </div>
+            {managerMode && (
+              <div className="seg">
+                <button className={moveType === "in" ? "on" : ""} onClick={() => setMoveType("in")}>Masuk</button>
+                <button className={moveType === "out" ? "on" : ""} onClick={() => setMoveType("out")}>Keluar</button>
+              </div>
+            )}
             <label className="fld">
               <span>Jumlah</span>
               <div className="stepper">
