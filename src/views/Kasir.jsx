@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Building2, Check, ChevronUp, Clock, LayoutGrid, Minus, Phone, Plus, Repeat, Search, ShoppingCart, Trash2, User, UserPlus, Users, Wallet, X } from "lucide-react";
+import { AlertTriangle, Building2, CalendarClock, Check, ChevronUp, Clock, LayoutGrid, Minus, Phone, Plus, Repeat, Search, ShoppingCart, Trash2, User, UserPlus, Users, Wallet, X } from "lucide-react";
 import { cfgKasir } from "../lib/config";
 import { PAY_LABEL, PAY_METHODS, SPLIT_METHODS, catIcon } from "../lib/constants";
 import { custLabel, custSub, custTitle, isBiz, normPhone } from "../lib/customers";
@@ -8,11 +8,13 @@ import { effPrice, hasCarton, hasPromo } from "../lib/inventory";
 
 /* ============================ Kasir / POS ============================ */
 
-function Kasir({ products, customers = [], onCheckout }) {
+function Kasir({ products, customers = [], onCheckout, backdate = false, openShifts = [] }) {
   // Aturan kasir (metode bayar aktif, tombol uang cepat, kewajiban isi) berasal
   // dari Pengaturan → Kasir. Dibaca tiap render supaya perubahan langsung terasa.
   const K = cfgKasir();
-  const payMethods = PAY_METHODS.filter((m) => K.methods.includes(m.key));
+  // Mode backdate: "Campur" (split) dinonaktifkan agar kalkulasi kas masuk laci
+  // tetap sederhana & tanpa celah.
+  const payMethods = PAY_METHODS.filter((m) => K.methods.includes(m.key) && (!backdate || m.key !== "split"));
   const [q, setQ] = useState("");
   const [cart, setCart] = useState({}); // "pid|mode" -> qty
   const [sheetOpen, setSheetOpen] = useState(false); // lembar keranjang (mobile) terbuka?
@@ -24,6 +26,32 @@ function Kasir({ products, customers = [], onCheckout }) {
   useEffect(() => {
     if (!K.methods.includes(method)) setMethod(K.defaultMethod);
   }, [K.methods.join(","), K.defaultMethod]);
+
+  // ===== Mode "Penjualan Lampau" (backdate) — hanya dipakai manajer =====
+  // Tanggal yang dipilih menjadi created_at di server (lewat p_sold_at) sehingga
+  // omzet & akuntansi jatuh di tanggal yang benar. Stok tetap dipotong SEKARANG.
+  // Server menolak tanggal >60 hari ke belakang (di-reset ke hari ini), jadi pemilih
+  // dibatasi maksimal 59 hari lalu agar tidak ada yang "menyusut" diam-diam.
+  const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const bdMax = ymd(new Date());
+  const bdMin = ymd(new Date(Date.now() - 59 * 86400000));
+  const [bdDate, setBdDate] = useState(() => ymd(new Date(Date.now() - 86400000))); // bawaan: kemarin
+  const [drawer, setDrawer] = useState(""); // laci kasir tujuan tunai (shift buka); "" = pegang/setor sendiri
+  // Default laci = shift buka pertama (tunai after-hours umumnya masuk ke laci kasir
+  // yang sedang berjalan). Manajer tetap bisa mengubah atau memilih "pegang sendiri".
+  useEffect(() => {
+    if (backdate && openShifts.length && !drawer) setDrawer(openShifts[0].id);
+  }, [backdate, openShifts.length]);
+  // "Campur" tidak berlaku di mode backdate — pindahkan ke metode lain bila terpilih.
+  useEffect(() => {
+    if (backdate && method === "split") setMethod(payMethods[0]?.key || "cash");
+  }, [backdate, method]);
+  // Tanggal terpilih -> ISO jam 12.00 waktu setempat (jauh dari batas hari/bulan agar
+  // tak pernah bocor ke hari sebelah karena konversi zona waktu WITA) + label id-ID.
+  const bdP = bdDate.split("-").map(Number);
+  const bdISO = new Date(bdP[0], (bdP[1] || 1) - 1, bdP[2] || 1, 12, 0, 0).toISOString();
+  const bdDisplay = new Date(bdP[0], (bdP[1] || 1) - 1, bdP[2] || 1, 12).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
+  const bdValid = !!bdDate && bdDate >= bdMin && bdDate <= bdMax;
 
   // ===== Pelanggan (dicatat untuk SEMUA transaksi, bukan hanya hutang) =====
   const [cust, setCust] = useState(null);       // pelanggan lama yang dipilih
@@ -148,7 +176,7 @@ function Kasir({ products, customers = [], onCheckout }) {
   // (metode hutang, atau toko mewajibkan pelanggan). Selain itu diciutkan agar
   // area pembayaran ringkas.
   const showPicker = custOpen || isHutang || !!K.requireCustomer;
-  const canPay = lines.length > 0 && (isSplit ? splitOk : paidOk) && custOk;
+  const canPay = lines.length > 0 && (isSplit ? splitOk : paidOk) && custOk && (!backdate || bdValid);
 
   // Rem anti klik-ganda: keranjang baru kosong SETELAH re-render, jadi klik kedua
   // yang sangat cepat masih lolos canPay dan bisa membuat transaksi kembar.
@@ -178,6 +206,7 @@ function Kasir({ products, customers = [], onCheckout }) {
       paid: isCash ? Number(paid) || total : total,
       change: isCash ? Math.max(0, change) : 0,
       ...splitMeta,
+      ...(backdate ? { backdateISO: bdISO, backdateDisplay: bdDisplay, drawerShiftId: drawer || null } : {}),
       items: lines.map((l) => ({
         pid: l.pid,
         name: l.p.name,
@@ -314,6 +343,23 @@ function Kasir({ products, customers = [], onCheckout }) {
         </div>
 
         <div className="cart-foot">
+          {backdate && (
+            <div className="cust-box" style={{ marginBottom: 10 }}>
+              <div className="cust-box-head">
+                <span className="cust-box-title"><CalendarClock size={14} /> Penjualan Lampau</span>
+                <span className="muted xs">backdate</span>
+              </div>
+              <div className="pay-row">
+                <CalendarClock size={15} />
+                <input className="pay-input" type="date" value={bdDate} min={bdMin} max={bdMax} onChange={(e) => setBdDate(e.target.value)} />
+              </div>
+              <div className={`pay-note ${bdValid ? "" : "warn"}`}>
+                {bdValid
+                  ? <>Tanggal <b>{bdDisplay}</b> dipakai untuk laporan &amp; akuntansi. Stok tetap dipotong sekarang.</>
+                  : <>Pilih tanggal antara {bdMin} s/d {bdMax} (maksimal 59 hari lalu).</>}
+              </div>
+            </div>
+          )}
           <div className="cart-total"><span>Total</span><span className="tab big" key={total}>{rp(total)}</span></div>
 
           {/* ===== Pelanggan: dicatat di SETIAP transaksi =====
@@ -486,6 +532,26 @@ function Kasir({ products, customers = [], onCheckout }) {
                   <span className="tab">{rp(Math.abs(change))}</span>
                 </div>
               )}
+              {backdate && openShifts.length > 0 && (
+                <div className="pay-row" style={{ marginTop: 6 }}>
+                  <Wallet size={15} />
+                  <select className="pay-input" value={drawer} onChange={(e) => setDrawer(e.target.value)}>
+                    {openShifts.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        Masuk laci: {s.cashier}{s.openedAt ? ` · ${new Date(s.openedAt).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })}` : ""}
+                      </option>
+                    ))}
+                    <option value="">Saya pegang / setor sendiri</option>
+                  </select>
+                </div>
+              )}
+              {backdate && (
+                <div className="pay-note">
+                  {drawer
+                    ? <>Tunai <b>{rp(total)}</b> dicatat masuk ke laci kasir terpilih — ikut hitungan saat tutup shift.</>
+                    : <>Tunai <b>{rp(total)}</b> dianggap Anda pegang / setor sendiri — tidak masuk hitungan laci kasir.</>}
+                </div>
+              )}
             </>
           )}
 
@@ -546,8 +612,8 @@ function Kasir({ products, customers = [], onCheckout }) {
           )}
 
           <button className={`btn full pay ${isHutang ? "hutang" : ""}`} disabled={!canPay} onClick={checkout}>
-            {isHutang ? <Clock size={16} /> : <Check size={16} />}
-            {isHutang ? "Catat hutang" : "Bayar"} {total > 0 ? rp(total) : ""}
+            {isHutang ? <Clock size={16} /> : (backdate ? <CalendarClock size={16} /> : <Check size={16} />)}
+            {isHutang ? (backdate ? "Catat hutang (lampau)" : "Catat hutang") : (backdate ? "Catat penjualan" : "Bayar")} {total > 0 ? rp(total) : ""}
           </button>
         </div>
       </aside>

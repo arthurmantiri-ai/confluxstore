@@ -67,6 +67,7 @@ export default function App() {
   const [shiftNote, setShiftNote] = useState("");
   const [shift, setShift] = useState(null); // shift kasir aktif (baris DB / objek lokal)
   const [shiftCashMoves, setShiftCashMoves] = useState([]); // kas laci non-penjualan (mode lokal)
+  const [openShifts, setOpenShifts] = useState([]); // shift kasir yang sedang BUKA (tujuan kas "Penjualan Lampau")
   const [closingBusy, setClosingBusy] = useState(false);
   const [btName, setBtName] = useState("");
   const managerMode = role === "manager";
@@ -569,6 +570,18 @@ export default function App() {
     return () => { clearInterval(t); window.removeEventListener("online", onNet); window.removeEventListener("pageshow", tick); };
   }, []);
 
+  // ===== Shift kasir yang sedang BUKA (untuk "Penjualan Lampau") =====
+  // Uang tunai transaksi after-hours bisa dicatat masuk ke laci kasir yang sedang
+  // berjalan agar cocok saat tutup shift. Dimuat ulang tiap kali layar dibuka.
+  useEffect(() => {
+    if (view !== "backdate" || !hasSupabase) return;
+    let alive = true;
+    Shifts.list(30)
+      .then((list) => { if (alive) setOpenShifts((list || []).filter((s) => s.status === "open")); })
+      .catch((e) => { console.error("[shift]", e); });
+    return () => { alive = false; };
+  }, [view]);
+
   // ===== Antrean pencatatan pelanggan (terpisah dari antrean penjualan) =====
   const custboxRef = useRef(loadCustbox());
   const [custPending, setCustPending] = useState(custboxRef.current.length);
@@ -744,8 +757,12 @@ export default function App() {
       flash("Data toko belum termuat dari server. Sambungkan internet lalu buka ulang aplikasi sebelum berjualan.");
       return;
     }
-    const saleDate = new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
-    const soldAt = new Date().toISOString();
+    // Backdate ("Penjualan Lampau"): ctx.saleDate & ctx.soldAtISO menimpa "sekarang".
+    // Server memakai p_sold_at sebagai created_at (sampai 60 hari ke belakang), jadi
+    // omzet & akuntansi jatuh di tanggal yang benar. Tanpa keduanya = perilaku normal.
+    const saleDate = ctx.saleDate || new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
+    const soldAt = ctx.soldAtISO || new Date().toISOString();
+    const localTs = ctx.soldAtISO ? Date.parse(ctx.soldAtISO) : Date.now();
 
     // 1) Perbarui layar seketika (stok, riwayat, log penjualan) — pengalaman kasir mulus.
     const newStock = {};
@@ -765,7 +782,7 @@ export default function App() {
       // walau baru tersinkron nanti).
       setSalesLog((sl) => [{
         id: uid(), productId: it.pid, qty: it.qty, revenue: it.revenue, cost: est, date: saleDate,
-        ts: Date.now(), txnId: ctx.txnId || null, cashier: ctx.cashier || null, method: ctx.method || null,
+        ts: localTs, txnId: ctx.txnId || null, cashier: ctx.cashier || null, method: ctx.method || null,
         shiftId: ctx.shiftId || null, qtyLabel, receiptNo: ctx.receiptNo || null, payments: ctx.payments || null,
       }, ...sl]);
       // Titip jual di mode lokal (tanpa server) dicatat langsung; di mode server,
@@ -813,14 +830,14 @@ export default function App() {
           kind: (cust.business || base.business) ? "bisnis" : (cust.kind || base.kind),
           txnCount: (base.txnCount || 0) + 1,
           totalSpent: (base.totalSpent || 0) + amount,
-          firstTxnAt: base.firstTxnAt || Date.now(),
-          lastTxnAt: Date.now(),
+          firstTxnAt: base.firstTxnAt || localTs,
+          lastTxnAt: localTs,
         };
         return i >= 0 ? cs.map((c, j) => (j === i ? merged : c)) : [merged, ...cs];
       });
       setCustVisits((vs) => [{
         txnId: ctx.txnId, customerId: localId, amount, pickedBy: cust.pickedBy || "",
-        cashier: ctx.cashier || "", method: ctx.method || "", at: Date.now(),
+        cashier: ctx.cashier || "", method: ctx.method || "", at: localTs,
       }, ...vs]);
       if (hasSupabase) {
         enqueueCustomer({
@@ -1171,18 +1188,18 @@ export default function App() {
   // Bangun objek bon + tampilkan seketika di daftar hutang, lalu KEMBALIKAN objeknya.
   // Penulisan ke server TIDAK dilakukan di sini: bon dititipkan ke paket penjualan
   // (antrean offline) agar tersimpan ATOMIK bersama transaksi & tahan internet putus.
-  const buildDebt = (meta, total) => {
+  const buildDebt = (meta, total, dateStr) => {
     const debt = {
       id: nextDebtId(debts),
       debtor: meta.debtor || "Pelanggan", business: meta.business || "", phone: meta.phone || "",
-      items: meta.items || [], total, date: today, status: "belum", paidAt: null,
+      items: meta.items || [], total, date: dateStr || today, status: "belum", paidAt: null,
     };
     setDebts((ds) => [debt, ...ds]);
     return debt;
   };
   // Bon di luar alur kasir (mode lokal tanpa server): tulis langsung seperti biasa.
-  const addDebt = (meta, total) => {
-    const debt = buildDebt(meta, total);
+  const addDebt = (meta, total, dateStr) => {
+    const debt = buildDebt(meta, total, dateStr);
     if (hasSupabase) persist(() => DebtsApi.create(debt));
     return debt;
   };
@@ -1263,7 +1280,7 @@ export default function App() {
   const buildSaleReceipt = (total, method, meta, no) => {
     return {
       kind: method === "hutang" ? "hutang" : "jual",
-      no: no || invoiceNo(), date: nowStamp(), cashier: cashierName || "Kasir",
+      no: no || invoiceNo(), date: meta.dateStamp || nowStamp(), cashier: cashierName || "Kasir",
       items: meta.items || [], total, methodLabel: PAY_LABEL[method] || method,
       paid: meta.paid, change: meta.change,
       payments: meta.payments || null,   // net (jumlah = total) — sama seperti yang diarsip
@@ -1544,6 +1561,44 @@ export default function App() {
                 else if (method === "split") flash(`Pembayaran ${rp(total)} campur (${payListLabel(meta.payments)}) berhasil`);
                 else flash(`Pembayaran ${rp(total)} via ${PAY_LABEL[method]} berhasil`);
                 showReceipt(buildSaleReceipt(total, method, meta, no));
+              }}
+            />
+          )}
+          {view === "backdate" && managerMode && (
+            <Kasir products={products} customers={customers} backdate openShifts={openShifts}
+              onCheckout={(lines, total, method, meta) => {
+                // Penjaga: katalog belum termuat (mode server) → jangan proses.
+                if (hasSupabase && !dataReadyRef.current) {
+                  flash("Data toko belum termuat dari server. Sambungkan internet lalu buka ulang aplikasi sebelum mencatat.");
+                  return;
+                }
+                const saleDate = meta.backdateDisplay;
+                const soldAtISO = meta.backdateISO;
+                if (!saleDate || !soldAtISO) { flash("Pilih tanggal transaksi dulu."); return; }
+                const txnId = "BD-" + uid(); // awalan BD- untuk jejak audit (seperti RTR- pada retur)
+                const no = invoiceNo();
+                // Bayar hutang: bon dibangun DULU lalu dititipkan ke paket penjualan
+                // (atomik satu RPC). Tanggal bon ikut tanggal backdate.
+                let debt = null;
+                if (method === "hutang") {
+                  debt = hasSupabase ? buildDebt(meta, total, saleDate) : addDebt(meta, total, saleDate);
+                }
+                sellItems(
+                  (meta.items || []).map((it) => ({ pid: it.pid, qty: it.qty, revenue: it.lineTotal, qtyLabel: it.qtyLabel })),
+                  `Penjualan lampau (${PAY_LABEL[method]}) — ${saleDate}`,
+                  { txnId, cashier: cashierName || "Manajer", method, receiptNo: no, payments: meta.payments || null, shiftId: null, debt, customer: meta.customer || null, saleDate, soldAtISO }
+                );
+                // Uang tunai after-hours yang masuk ke laci kasir yang sedang buka:
+                // dicatat sebagai KAS-MASUK pada shift itu agar cocok saat tutup shift.
+                // Ini BUKAN pendapatan ganda — pendapatan sudah dari baris penjualan;
+                // ini hanya penyesuaian isi laci. Non-tunai & hutang tidak menyentuh laci.
+                if (method === "cash" && meta.drawerShiftId) {
+                  const amt = Number(total) || 0;
+                  if (amt > 0) persist(() => Shifts.cashMove(meta.drawerShiftId, "in", amt, `Penjualan lampau ${no} (${saleDate})`));
+                }
+                if (method === "hutang") flash(`Hutang ${rp(total)} dicatat tanggal ${saleDate} — ${meta?.debtor || "Pelanggan"}`);
+                else flash(`Penjualan lampau ${rp(total)} tanggal ${saleDate} via ${PAY_LABEL[method]} tercatat`);
+                showReceipt(buildSaleReceipt(total, method, { ...meta, dateStamp: saleDate }, no));
               }}
             />
           )}

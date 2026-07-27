@@ -1,4 +1,4 @@
-import { Banknote, Bean, Calculator, ClipboardList, Clock, Coffee, Coins, CreditCard, CupSoda, Droplets, Globe, Handshake, History, Landmark, LayoutDashboard, LineChart, Package, QrCode, RefreshCcw, Settings, ShoppingCart, Undo2, Users, Wallet } from "lucide-react";
+import { Banknote, Bean, Calculator, CalendarClock, ClipboardList, Clock, Coffee, Coins, CreditCard, CupSoda, Droplets, Globe, Handshake, History, Landmark, LayoutDashboard, LineChart, Package, QrCode, RefreshCcw, Settings, ShoppingCart, Undo2, Users, Wallet } from "lucide-react";
 import { rp } from "./format";
 
 // ===== Navigasi sidebar (dikelompokkan per kategori) =====
@@ -18,6 +18,7 @@ const NAV_GROUPS = [
     title: "Penjualan",
     items: [
       { key: "kasir", label: "Kasir", icon: ShoppingCart, roles: ["cashier", "manager"] },
+      { key: "backdate", label: "Penjualan Lampau", icon: CalendarClock, roles: ["manager"] },
       { key: "order", label: "Order Online", icon: Globe, roles: ["cashier", "manager"] },
       { key: "retur", label: "Retur & Tukar", icon: Undo2, roles: ["cashier", "manager"] },
       { key: "riwayat", label: "Riwayat Penjualan", icon: History, roles: ["cashier", "manager"] },
