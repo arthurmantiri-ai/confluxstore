@@ -160,7 +160,7 @@ const SET_TABS = [
   ["sistem", "Shift & Sistem", ShieldCheck],
 ];
 
-function SettingsView({ store, saving, onSave, device, setDevice, btName, onConnect, onTest, onSample, products = [], flash }) {
+function SettingsView({ store, saving, onSave, device, setDevice, theme, onSetTheme, btName, onConnect, onTest, onSample, products = [], flash }) {
   const [tab, setTab] = useState("toko");
   // Draf: salinan kerja. Database baru disentuh saat "Simpan perubahan" ditekan.
   const [d, setD] = useState(store);
@@ -227,6 +227,15 @@ function SettingsView({ store, saving, onSave, device, setDevice, btName, onConn
         {tab === "toko" && (
           <div className="set-cols">
             <div className="set-col">
+              <div className="set-card">
+                <div className="set-head"><h3>Tampilan aplikasi</h3></div>
+                <p className="set-desc">Mode terang memakai latar cerah — lebih mudah dilihat di ruangan yang terang. Pilihan ini tersimpan di perangkat ini.</p>
+                <div className="seg">
+                  <button type="button" className={theme !== "light" ? "on" : ""} onClick={() => onSetTheme && onSetTheme("dark")}>Gelap</button>
+                  <button type="button" className={theme === "light" ? "on" : ""} onClick={() => onSetTheme && onSetTheme("light")}>Terang</button>
+                </div>
+              </div>
+
               <div className="set-card">
                 <div className="set-head"><h3>Identitas toko</h3><button className="btn ghost xs" onClick={() => resetSec("toko")}><RefreshCcw size={12} /> Bawaan</button></div>
                 <p className="set-desc">Dipakai di kepala nota, pesan WhatsApp ke pelanggan, dan judul berkas export.</p>

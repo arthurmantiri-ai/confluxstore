@@ -23,7 +23,59 @@ function Style() {
         --shadow-lg:0 8px 24px rgba(0,0,0,.3), 0 24px 60px rgba(0,0,0,.4);
         --shadow-accent:0 6px 22px rgba(226,81,77,.28);
         --ease:cubic-bezier(.22,.61,.36,1);
+        color-scheme:dark;
       }
+
+      /* =============================== TEMA TERANG ===============================
+         Diaktifkan lewat <html data-theme="light">. Cukup membalik token :root —
+         seluruh kartu, tabel, modal, kasir, dsb. memakai var(--…) sehingga ikut
+         berubah otomatis. Sidebar & layar login sengaja tetap gelap (rel merek
+         yang konsisten), jadi token gelapnya ditegakkan ulang khusus di sana. */
+      :root[data-theme="light"]{
+        color-scheme:light;
+        --bg:#ECE8DF; --surface:#FFFFFF; --surface-2:#F3EFE7; --surface-3:#F8F5EE;
+        --ink:#1F2E28; --ink-soft:#586A61; --ink-faint:#8A9A90;
+        --line:rgba(28,44,36,.13); --line-soft:rgba(28,44,36,.07); --hair:rgba(28,44,36,.09);
+        --accent:#D6423E; --accent-d:#B8362F; --accent-soft:rgba(214,66,62,.12);
+        --teal:#3E8C6E; --teal-d:#2F6E56; --teal-soft:rgba(62,140,110,.14);
+        --gold:#B7841F;
+        --ok:#2E9E63; --ok-bg:rgba(46,158,99,.14);
+        --warn:#B7841F; --warn-bg:rgba(183,132,31,.16);
+        --crit:#D6423E; --crit-bg:rgba(214,66,62,.12);
+        --shadow:0 1px 2px rgba(28,44,36,.05), 0 6px 20px rgba(28,44,36,.09);
+        --shadow-sm:0 1px 2px rgba(28,44,36,.05), 0 3px 10px rgba(28,44,36,.06);
+        --shadow-lg:0 10px 28px rgba(28,44,36,.12), 0 24px 60px rgba(28,44,36,.14);
+        --shadow-accent:0 6px 20px rgba(214,66,62,.22);
+      }
+      /* Pulau gelap: sidebar + drawer + layar login tetap pakai palet gelap. */
+      [data-theme="light"] .sidebar,[data-theme="light"] .gate{
+        --bg:#121A16; --surface:#1B2521; --surface-2:#24302A; --surface-3:#202B26;
+        --ink:#ECE7DA; --ink-soft:#9DAEA3; --ink-faint:#6F8077;
+        --line:rgba(236,231,218,.09); --line-soft:rgba(236,231,218,.05); --hair:rgba(236,231,218,.06);
+        --accent:#E2514D; --accent-d:#C8453B; --accent-soft:rgba(226,81,77,.16);
+        --teal:#6FAE92; --teal-d:#5B8F80; --teal-soft:rgba(111,174,146,.16);
+        --ok:#5FB585; --ok-bg:rgba(95,181,133,.16);
+        --warn:#E0A53C; --warn-bg:rgba(224,165,60,.16);
+        --crit:#E2514D; --crit-bg:rgba(226,81,77,.16);
+      }
+      /* Titik hardcode di area terang yang tidak otomatis ikut token. */
+      [data-theme="light"] .topbar{background:rgba(255,255,255,.82)}
+      [data-theme="light"] select option{background:#fff;color:#1F2E28}
+      [data-theme="light"] select option:disabled{color:#8A9A90}
+      [data-theme="light"] select option:checked{background:#EAF3EE;color:#1F2E28}
+      [data-theme="light"] .txn.open{border-color:rgba(28,44,36,.2)}
+      [data-theme="light"] .set-toggle:hover{border-color:rgba(28,44,36,.18)}
+      [data-theme="light"] .diag-state>div{background:var(--surface-2)}
+      /* Banner sinkron & diagnosa: warna teks/ikon dipertegas agar terbaca di latar terang. */
+      [data-theme="light"] .sync-banner.offline,[data-theme="light"] .sync-banner.pending{color:#8a5a12}
+      [data-theme="light"] .sync-banner.offline svg,[data-theme="light"] .sync-banner.pending svg{color:#b7841f}
+      [data-theme="light"] .sync-banner.syncing{color:#1b6b86}
+      [data-theme="light"] .sync-banner.syncing svg{color:#2b8fb0}
+      [data-theme="light"] .sync-banner.dead{color:#b23a3a}
+      [data-theme="light"] .sync-banner.dead svg{color:#cf4b4b}
+      [data-theme="light"] .diag-note.ok{color:#1f7a44}
+      [data-theme="light"] .diag-note.bad,[data-theme="light"] .diag-err{color:#b23a3a}
+      [data-theme="light"] .txn-unsynced{color:#8a5a12}
       /* Kunci pull-to-refresh & overscroll browser (tarik ke bawah tidak me-refresh halaman) */
       html,body{overscroll-behavior:none}
       input,select,textarea{color:var(--ink);background:transparent;font-family:inherit}
@@ -967,11 +1019,10 @@ function Style() {
         .chip,.set-tab,.ret-pill{padding:9px 15px}
       }
 
-      /* -- Ruang: POS & grid ringkasan ke 1 kolom (murni soal lebar) -- */
+      /* -- Ruang: grid ringkasan ke 1 kolom (murni soal lebar) -- */
       @media (max-width:980px){
         .grid-4{grid-template-columns:repeat(2,1fr)}
         .grid-2-1{grid-template-columns:1fr}
-        .pos-screen{grid-template-columns:minmax(0,1fr);height:auto}
         .restock-card{grid-template-columns:1fr}
         .rop-meta{grid-template-columns:repeat(2,1fr)}
       }
@@ -986,16 +1037,22 @@ function Style() {
         .order-grid,.slog-list{grid-template-columns:1fr}
       }
 
-      /* ================= Keranjang: lembar bawah (bottom sheet) mobile =================
-         Saat POS 1 kolom (≤980px), keranjang tidak lagi menumpuk di bawah daftar
-         produk. Bilah ringkas berisi total SELALU menempel di dasar layar; ketuk untuk
-         membuka lembar penuh. Di dalam lembar, kepala (grip + judul) dan kaki (Total +
-         tombol Bayar) DIPATOK — hanya daftar barang yang menggulir — jadi tombol Bayar
-         selalu terlihat tanpa perlu scroll. Desktop (>980px) tidak terpengaruh. */
+      /* ================= Keranjang: lembar bawah (bottom sheet) =================
+         Aktif pada layar sempit (≤980px) DAN pada semua perangkat sentuh
+         (pointer:coarse) — termasuk tablet dalam posisi landscape yang lebarnya
+         >980px — mengikuti logika yang sama dengan laci sidebar. Bilah ringkas
+         berisi total SELALU menempel di dasar layar; ketuk untuk membuka lembar
+         penuh. Di dalam lembar, kepala (grip + judul) dan kaki (Total + tombol
+         Bayar) DIPATOK — hanya daftar barang yang menggulir — jadi tombol Bayar
+         selalu terlihat tanpa perlu scroll. Desktop pointer halus (>980px) tetap
+         memakai keranjang kolom samping. */
       .cart-bar{display:none}
       .sheet-scrim{display:none}
       .sheet-close{display:none}
-      @media (max-width:980px){
+      @media (pointer:coarse),(max-width:980px){
+        /* POS jadi 1 kolom di sini juga (bukan hanya soal lebar) supaya tidak ada
+           kolom 360px kosong saat keranjang berpindah ke lembar bawah. */
+        .pos-screen{grid-template-columns:minmax(0,1fr);height:auto}
         /* ruang di dasar agar bilah tetap tidak menutupi baris produk terakhir */
         .pos-screen{padding-bottom:80px}
 
@@ -1147,6 +1204,17 @@ function Style() {
       .cust-hint{font-size:11.5px;color:var(--ink-faint)}
       .cust-hint.ok{color:var(--teal)}
       .cust-new-btn{align-self:flex-start}
+      /* Tombol ramping saat pemilih pelanggan diciutkan — hemat ruang di area bayar. */
+      .cust-add-btn{display:flex;align-items:center;gap:9px;width:100%;text-align:left;font:inherit;cursor:pointer;
+        border:1px dashed var(--line);background:var(--surface-3);color:var(--ink-soft);
+        border-radius:var(--r-sm);padding:11px 13px;transition:border-color .15s,color .15s,background .15s}
+      .cust-add-btn:hover{border-color:var(--teal);color:var(--ink);background:var(--surface-2)}
+      .cust-add-btn svg{color:var(--teal);flex:0 0 auto}
+      .cust-add-label{font-weight:600;font-size:13px}
+      .cust-add-tag{margin-left:auto;font-size:11px;font-weight:600;color:var(--ink-faint)}
+      .cust-collapse{border:none;background:none;font:inherit;font-size:11.5px;font-weight:600;color:var(--teal);
+        cursor:pointer;padding:0}
+      .cust-collapse:hover{color:var(--teal-d);text-decoration:underline}
       .cust-new{display:flex;flex-direction:column;gap:7px;border-top:1px dashed var(--line);padding-top:9px}
       .cust-kind{display:flex;align-items:center;gap:6px}
       .cust-kind-btn{flex:1;border:1px solid var(--line);background:var(--surface);border-radius:var(--r-xs);

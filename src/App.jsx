@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Bell, Check, Lock, LogOut, Menu, Printer, Settings, ShieldCheck, ShoppingCart } from "lucide-react";
+import { Bell, Check, Lock, LogOut, Menu, Moon, Printer, Settings, ShieldCheck, ShoppingCart, Sun } from "lucide-react";
 import { Auth, Capital, CashDeposits, Consign, Customers as CustomersApi, Debts as DebtsApi, Expenses, Movements, Orders as OrdersApi, Products, Profiles, Returns as ReturnsApi, Sales, Settings as SettingsApi, Shifts } from "./db";
 import { hasSupabase } from "./supabaseClient";
 import { LOGO } from "./assets/logo";
@@ -35,6 +35,13 @@ import { Simulation } from "./views/Simulation";
 
 /* =============================== App =============================== */
 
+// Preferensi tema per-perangkat (gelap/terang), tersimpan di localStorage.
+const THEME_KEY = "conflux.theme.v1";
+const loadTheme = () => {
+  try { return localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark"; }
+  catch (e) { return "dark"; }
+};
+
 export default function App() {
   const [view, setView] = useState("dashboard");
   const [products, setProducts] = useState(SEED_PRODUCTS);
@@ -66,6 +73,16 @@ export default function App() {
   const [store, setStore] = useState(DEFAULT_STORE);
   // Pengaturan printer khusus perangkat ini (opsional, tersimpan di localStorage).
   const [device, setDevice] = useState(loadDevice);
+  // Tema tampilan (gelap/terang) — preferensi per-perangkat.
+  const [theme, setTheme] = useState(loadTheme);
+  useEffect(() => {
+    const el = document.documentElement;
+    el.setAttribute("data-theme", theme);
+    try { localStorage.setItem(THEME_KEY, theme); } catch (e) {}
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", theme === "light" ? "#ECE8DF" : "#121A16");
+  }, [theme]);
+  const toggleTheme = () => setTheme((t) => (t === "light" ? "dark" : "light"));
   // Profil cetak efektif = pengaturan server, ditimpa pengaturan perangkat bila aktif.
   const printCfg = printProfile(store, device);
   // Cermin pengaturan ke modul SEBELUM anak-anak dirender, supaya fungsi util
@@ -1441,6 +1458,12 @@ export default function App() {
                 <Bell size={15} /> {lowStock.length} perlu re-stok
               </button>
             )}
+            <button
+              className="icon-btn"
+              title={theme === "light" ? "Ganti ke mode gelap" : "Ganti ke mode terang"}
+              aria-label={theme === "light" ? "Ganti ke mode gelap" : "Ganti ke mode terang"}
+              onClick={toggleTheme}
+            >{theme === "light" ? <Moon size={18} /> : <Sun size={18} />}</button>
             {/* Manajer: buka halaman Pengaturan lengkap. Kasir: hanya pengaturan
                 printer perangkat ini — aturan toko tidak boleh diubah dari kasir. */}
             <button
@@ -1601,6 +1624,7 @@ export default function App() {
             <SettingsView
               store={store} saving={savingCfg} onSave={saveSettings}
               device={device} setDevice={applyDevice}
+              theme={theme} onSetTheme={setTheme}
               btName={btName} onConnect={connectBt} onTest={testPrint}
               onSample={() => triggerPrint(sampleReceipt())}
               products={products} flash={flash}

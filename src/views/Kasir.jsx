@@ -28,6 +28,7 @@ function Kasir({ products, customers = [], onCheckout }) {
   // ===== Pelanggan (dicatat untuk SEMUA transaksi, bukan hanya hutang) =====
   const [cust, setCust] = useState(null);       // pelanggan lama yang dipilih
   const [custQ, setCustQ] = useState("");       // kotak cari pelanggan
+  const [custOpen, setCustOpen] = useState(false); // pemilih pelanggan dibuka (default ciut = hemat ruang saat bayar)
   const [newOpen, setNewOpen] = useState(false);// form pelanggan baru terbuka
   const [nName, setNName] = useState("");
   const [nBiz, setNBiz] = useState("");
@@ -37,7 +38,7 @@ function Kasir({ products, customers = [], onCheckout }) {
   // data usaha — hanya jejak per transaksi.
   const [pickedBy, setPickedBy] = useState("");
   const resetCust = () => {
-    setCust(null); setCustQ(""); setNewOpen(false); setPickedBy("");
+    setCust(null); setCustQ(""); setNewOpen(false); setCustOpen(false); setPickedBy("");
     setNName(""); setNBiz(""); setNPhone(""); setNKind("individu");
   };
   // Pelanggan yang akan ikut tercatat pada transaksi ini (null = tanpa pelanggan)
@@ -143,6 +144,10 @@ function Kasir({ products, customers = [], onCheckout }) {
   // Wajib mencatat pelanggan (opsional): berguna untuk toko yang ingin riwayat
   // pembelian lengkap. Metode hutang SELALU wajib bernama.
   const custOk = (!K.requireCustomer || !!custPick?.name || !!custPick?.business) && (!isHutang || !!custPick?.name);
+  // Pemilih pelanggan tampil penuh bila kasir membukanya, atau bila memang wajib
+  // (metode hutang, atau toko mewajibkan pelanggan). Selain itu diciutkan agar
+  // area pembayaran ringkas.
+  const showPicker = custOpen || isHutang || !!K.requireCustomer;
   const canPay = lines.length > 0 && (isSplit ? splitOk : paidOk) && custOk;
 
   // Rem anti klik-ganda: keranjang baru kosong SETELAH re-render, jadi klik kedua
@@ -315,12 +320,18 @@ function Kasir({ products, customers = [], onCheckout }) {
               Pelanggan lama tinggal dipilih dari daftar (tanpa mengetik ulang),
               pelanggan baru cukup diisi sekali lalu otomatis masuk master. */}
           <div className="cust-box">
-            <div className="cust-box-head">
-              <span className="cust-box-title"><Users size={14} /> Pelanggan</span>
-              {isHutang
-                ? <span className="cust-req">wajib untuk hutang</span>
-                : <span className="muted xs">opsional</span>}
-            </div>
+            {(cust || showPicker) && (
+              <div className="cust-box-head">
+                <span className="cust-box-title"><Users size={14} /> Pelanggan</span>
+                {isHutang
+                  ? <span className="cust-req">wajib untuk hutang</span>
+                  : K.requireCustomer
+                    ? <span className="cust-req">wajib</span>
+                    : (!cust && custOpen)
+                      ? <button type="button" className="cust-collapse" onClick={() => setCustOpen(false)}>Sembunyikan</button>
+                      : <span className="muted xs">opsional</span>}
+              </div>
+            )}
 
             {cust ? (
               <div className="cust-chip">
@@ -336,7 +347,7 @@ function Kasir({ products, customers = [], onCheckout }) {
                 )}
                 <button className="icon-btn xs" title="Ganti pelanggan" onClick={resetCust}><X size={14} /></button>
               </div>
-            ) : (
+            ) : showPicker ? (
               <>
                 <div className="search sm cust-search">
                   <Search size={15} />
@@ -423,6 +434,12 @@ function Kasir({ products, customers = [], onCheckout }) {
                   </div>
                 )}
               </>
+            ) : (
+              <button type="button" className="cust-add-btn" onClick={() => setCustOpen(true)}>
+                <UserPlus size={15} />
+                <span className="cust-add-label">Tambah pelanggan</span>
+                <span className="cust-add-tag">opsional</span>
+              </button>
             )}
 
             {/* Pelanggan USAHA: catat siapa yang datang mengambil hari ini.

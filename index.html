@@ -3,8 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#121A16" />
     <link rel="icon" type="image/jpeg" href="/logo.jpg" />
     <title>Conflux — Manajemen Toko</title>
+    <script>
+      // Terapkan tema tersimpan SEBELUM render pertama agar tidak ada kedip gelap→terang.
+      (function () {
+        try {
+          var t = localStorage.getItem("conflux.theme.v1");
+          document.documentElement.setAttribute("data-theme", t === "light" ? "light" : "dark");
+          var m = document.querySelector('meta[name="theme-color"]');
+          if (m && t === "light") m.setAttribute("content", "#ECE8DF");
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
