@@ -190,7 +190,7 @@ function Kasir({ products, customers = [], onCheckout }) {
   const quickPay = [total, ...K.quickCash.map((v) => Math.ceil(total / v) * v)];
 
   return (
-    <div className="pos">
+    <div className="pos-screen">
       <section className="pos-products">
         <div className="cat-tabs">
           <button className={`cat-tab ${cat === "all" ? "on" : ""}`} onClick={() => setCat("all")}>
