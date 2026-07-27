@@ -974,6 +974,59 @@ function Style() {
         .order-grid,.slog-list{grid-template-columns:1fr}
       }
 
+      /* ================= Keranjang: lembar bawah (bottom sheet) mobile =================
+         Saat POS 1 kolom (≤980px), keranjang tidak lagi menumpuk di bawah daftar
+         produk. Bilah ringkas berisi total SELALU menempel di dasar layar; ketuk untuk
+         membuka lembar penuh. Di dalam lembar, kepala (grip + judul) dan kaki (Total +
+         tombol Bayar) DIPATOK — hanya daftar barang yang menggulir — jadi tombol Bayar
+         selalu terlihat tanpa perlu scroll. Desktop (>980px) tidak terpengaruh. */
+      .cart-bar{display:none}
+      .sheet-scrim{display:none}
+      .sheet-close{display:none}
+      @media (max-width:980px){
+        /* ruang di dasar agar bilah tetap tidak menutupi baris produk terakhir */
+        .pos{padding-bottom:80px}
+
+        /* bilah ringkas tetap di bawah — selalu tampak */
+        .cart-bar{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:40;
+          align-items:center;gap:12px;width:100%;border:none;text-align:left;font:inherit;color:var(--ink);
+          padding:11px 16px calc(11px + env(safe-area-inset-bottom,0px));cursor:pointer;
+          background:linear-gradient(180deg,var(--surface-2),var(--surface));
+          border-top:1px solid var(--line);box-shadow:0 -6px 22px rgba(0,0,0,.32)}
+        .cart-bar:active:not(:disabled){background:var(--surface-3)}
+        .cart-bar:disabled{cursor:default;opacity:.9}
+        .cart-bar-ic{position:relative;display:grid;place-items:center;width:42px;height:42px;flex:0 0 42px;
+          border-radius:var(--r-sm);background:var(--accent-soft);color:var(--accent)}
+        .cart-bar-count{position:absolute;top:-5px;right:-5px;min-width:19px;height:19px;padding:0 5px;
+          border-radius:10px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;
+          display:grid;place-items:center;box-shadow:var(--shadow-accent)}
+        .cart-bar-mid{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+        .cart-bar-total{font-family:'Space Grotesk';font-weight:700;font-size:19px;line-height:1.1}
+        .cart-bar-label{font-size:12px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .cart-bar-empty{font-size:14px;font-weight:600;color:var(--ink-soft)}
+        .cart-bar-caret{color:var(--ink-faint);flex:0 0 auto}
+
+        /* scrim gelap di belakang lembar */
+        .sheet-scrim{display:block;position:fixed;inset:0;z-index:65;background:rgba(8,12,10,.55);
+          backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);animation:scrim-in .2s ease}
+
+        /* keranjang → lembar yang naik dari bawah; kepala & kaki dipatok, isi menggulir */
+        .cart{position:fixed;left:0;right:0;bottom:0;z-index:70;
+          max-height:92vh;max-height:92dvh;overflow:hidden;
+          border-radius:var(--r-lg) var(--r-lg) 0 0;transform:translateY(101%);
+          transition:transform .28s var(--ease);box-shadow:0 -14px 48px rgba(0,0,0,.5)}
+        .cart.sheet-open{transform:translateY(0)}
+        .cart-head{flex:0 0 auto}
+        .cart-lines{flex:1 1 auto;min-height:48px;overflow-y:auto;overscroll-behavior:contain}
+        .cart-foot{flex:0 0 auto;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))}
+
+        /* pegangan tarik (grip) + area ketuk untuk menutup di puncak lembar */
+        .sheet-close{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:100%;
+          border:none;background:none;padding:10px 0 3px;cursor:pointer}
+        .sheet-grip{display:block;width:42px;height:5px;border-radius:3px;background:var(--line);transition:background .15s}
+        .sheet-close:active .sheet-grip{background:var(--ink-faint)}
+      }
+
       /* ===== Retur & Tukar ===== */
       .ret-badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:700;padding:3px 8px;border-radius:999px;white-space:nowrap}
       .ret-badge.rf{background:var(--accent-soft);color:var(--accent)}

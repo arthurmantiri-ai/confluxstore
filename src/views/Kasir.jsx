@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Building2, Check, Clock, LayoutGrid, Minus, Phone, Plus, Repeat, Search, ShoppingCart, Trash2, User, UserPlus, Users, Wallet, X } from "lucide-react";
+import { AlertTriangle, Building2, Check, ChevronUp, Clock, LayoutGrid, Minus, Phone, Plus, Repeat, Search, ShoppingCart, Trash2, User, UserPlus, Users, Wallet, X } from "lucide-react";
 import { cfgKasir } from "../lib/config";
 import { PAY_LABEL, PAY_METHODS, SPLIT_METHODS, catIcon } from "../lib/constants";
 import { custLabel, custSub, custTitle, isBiz, normPhone } from "../lib/customers";
@@ -15,6 +15,7 @@ function Kasir({ products, customers = [], onCheckout }) {
   const payMethods = PAY_METHODS.filter((m) => K.methods.includes(m.key));
   const [q, setQ] = useState("");
   const [cart, setCart] = useState({}); // "pid|mode" -> qty
+  const [sheetOpen, setSheetOpen] = useState(false); // lembar keranjang (mobile) terbuka?
   const [paid, setPaid] = useState("");
   const [method, setMethod] = useState(K.defaultMethod);
   const [cat, setCat] = useState("all");
@@ -181,7 +182,7 @@ function Kasir({ products, customers = [], onCheckout }) {
       })),
     };
     onCheckout(lines.map((l) => ({ pid: l.pid, qty: l.satuan })), total, method, meta);
-    setCart({}); setPaid(""); setMethod(K.defaultMethod); setParts(FRESH_PARTS); resetCust();
+    setCart({}); setPaid(""); setMethod(K.defaultMethod); setParts(FRESH_PARTS); resetCust(); setSheetOpen(false);
   };
 
   // Tombol uang cepat: uang pas + pembulatan ke atas sesuai pecahan di Pengaturan
@@ -242,7 +243,37 @@ function Kasir({ products, customers = [], onCheckout }) {
         </div>
       </section>
 
-      <aside className="cart">
+      {/* Bilah keranjang tetap (mobile/tablet 1 kolom): total SELALU terlihat di
+          bawah; ketuk untuk membuka lembar penuh. Di desktop bilah, scrim, dan
+          pegangan ini disembunyikan oleh CSS — keranjang tetap kolom kanan biasa. */}
+      <button
+        type="button"
+        className="cart-bar"
+        disabled={lines.length === 0}
+        onClick={() => { if (lines.length) setSheetOpen(true); }}
+      >
+        <span className="cart-bar-ic">
+          <ShoppingCart size={18} />
+          {lines.length > 0 && <span className="cart-bar-count">{lines.length}</span>}
+        </span>
+        <span className="cart-bar-mid">
+          {lines.length === 0 ? (
+            <span className="cart-bar-empty">Keranjang masih kosong</span>
+          ) : (
+            <>
+              <span className="cart-bar-total tab">{rp(total)}</span>
+              <span className="cart-bar-label">{lines.length} item · ketuk untuk bayar</span>
+            </>
+          )}
+        </span>
+        {lines.length > 0 && <ChevronUp className="cart-bar-caret" size={20} />}
+      </button>
+      {sheetOpen && <div className="sheet-scrim" onClick={() => setSheetOpen(false)} />}
+
+      <aside className={`cart ${sheetOpen ? "sheet-open" : ""}`}>
+        <button type="button" className="sheet-close" onClick={() => setSheetOpen(false)} aria-label="Tutup keranjang">
+          <span className="sheet-grip" />
+        </button>
         <div className="cart-head"><ShoppingCart size={18} /> <span>Keranjang</span><span className="cart-count" key={lines.length}>{lines.length}</span></div>
         <div className="cart-lines">
           {lines.length === 0 && (
