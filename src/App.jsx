@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Bell, Check, Lock, LogOut, Menu, Moon, Printer, Settings, ShieldCheck, ShoppingCart, Sun } from "lucide-react";
+import { Bell, Check, ChevronDown, Lock, LogOut, Menu, Moon, Printer, Settings, ShieldCheck, ShoppingCart, Sun } from "lucide-react";
 import { Auth, Capital, CashDeposits, Consign, Customers as CustomersApi, Debts as DebtsApi, Expenses, Movements, Orders as OrdersApi, Products, Profiles, Returns as ReturnsApi, Sales, Settings as SettingsApi, Shifts } from "./db";
 import { hasSupabase } from "./supabaseClient";
 import { LOGO } from "./assets/logo";
@@ -59,6 +59,20 @@ export default function App() {
   const [custVisits, setCustVisits] = useState([]); // buku kunjungan: 1 baris / transaksi
   const [toast, setToast] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Sidebar sebagai dropdown: tiap kategori bisa dibuka/ditutup agar daftar tidak
+  // terlalu panjang. Awalnya hanya grup yang memuat halaman aktif yang terbuka.
+  const [openGroups, setOpenGroups] = useState(() => {
+    const g = NAV_GROUPS.find((grp) => grp.items.some((it) => it.key === view));
+    return g ? { [g.title]: true } : {};
+  });
+  const toggleGroup = (title) => setOpenGroups((o) => ({ ...o, [title]: !o[title] }));
+  // Pastikan grup yang memuat halaman aktif SELALU terbuka — termasuk saat pindah
+  // halaman lewat jalur non-sidebar (tombol Pengaturan, lonceng re-stok, dsb.),
+  // supaya menu yang sedang aktif tidak tersembunyi di dalam grup yang tertutup.
+  useEffect(() => {
+    const g = NAV_GROUPS.find((grp) => grp.items.some((it) => it.key === view));
+    if (g) setOpenGroups((o) => (o[g.title] ? o : { ...o, [g.title]: true }));
+  }, [view]);
   const [role, setRole] = useState(null); // null = belum login, "cashier" | "manager"
   const [cashierName, setCashierName] = useState("");
   const [shiftStart, setShiftStart] = useState(null);
@@ -1350,6 +1364,9 @@ export default function App() {
   }, [localInvValue]);
   const newOrders = orders.filter((o) => o.status === "baru").length;
   const unpaidDebts = debts.filter((d) => d.status === "belum").length;
+  // Angka badge tiap item sidebar (dan agregatnya per grup saat grup ditutup),
+  // supaya jumlah yang butuh perhatian tetap terlihat walau kategorinya dilipat.
+  const navBadge = (key) => (key === "order" ? newOrders : key === "restok" ? lowStock.length : key === "hutang" ? unpaidDebts : 0);
 
   // Chart 7 hari + penjualan hari ini, dari transaksi nyata (txnId terisi)
   const salesChart = useMemo(() => {
@@ -1428,25 +1445,40 @@ export default function App() {
             // termasuk judulnya — agar sidebar tetap ringkas.
             const items = group.items.filter((n) => n.roles.includes(role));
             if (items.length === 0) return null;
+            const open = !!openGroups[group.title];
+            // Total badge grup (pesanan baru / re-stok / hutang) — supaya jumlah
+            // yang perlu perhatian tetap terlihat di judul walau grupnya ditutup.
+            const groupBadge = items.reduce((s, n) => s + navBadge(n.key), 0);
             return (
-              <div key={group.title} className="nav-group">
-                <div className="nav-group-title">{group.title}</div>
-                {items.map((n) => {
-                  const Icon = n.icon;
-                  const active = view === n.key;
-                  const badge = n.key === "order" ? newOrders : n.key === "restok" ? lowStock.length : n.key === "hutang" ? unpaidDebts : 0;
-                  return (
-                    <button
-                      key={n.key}
-                      className={`nav-item ${active ? "active" : ""}`}
-                      onClick={() => { setView(n.key); setSidebarOpen(false); }}
-                    >
-                      <Icon size={18} strokeWidth={2} />
-                      <span>{n.label}</span>
-                      {badge > 0 && <span className="nav-badge">{badge}</span>}
-                    </button>
-                  );
-                })}
+              <div key={group.title} className={`nav-group ${open ? "open" : "collapsed"}`}>
+                <button
+                  type="button"
+                  className="nav-group-title"
+                  onClick={() => toggleGroup(group.title)}
+                  aria-expanded={open}
+                >
+                  <span className="nav-group-label">{group.title}</span>
+                  {!open && groupBadge > 0 && <span className="nav-group-badge">{groupBadge}</span>}
+                  <ChevronDown className="nav-chevron" size={14} strokeWidth={2.4} />
+                </button>
+                <div className="nav-group-items">
+                  {items.map((n) => {
+                    const Icon = n.icon;
+                    const active = view === n.key;
+                    const badge = navBadge(n.key);
+                    return (
+                      <button
+                        key={n.key}
+                        className={`nav-item ${active ? "active" : ""}`}
+                        onClick={() => { setView(n.key); setSidebarOpen(false); }}
+                      >
+                        <Icon size={18} strokeWidth={2} />
+                        <span>{n.label}</span>
+                        {badge > 0 && <span className="nav-badge">{badge}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             );
           })}
