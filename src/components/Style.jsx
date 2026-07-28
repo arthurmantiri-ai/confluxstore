@@ -797,6 +797,11 @@ function Style() {
 
       .auto-tag{font-size:9.5px;font-weight:700;letter-spacing:.04em;color:var(--teal);background:var(--teal-soft);
         padding:1px 6px;border-radius:5px;margin-left:5px;vertical-align:middle}
+      .debt-filter{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+      .debt-filter .acc-period{flex-wrap:wrap}
+      .debt-range-sum{display:flex;align-items:center;gap:9px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--line);
+        border-radius:10px;padding:9px 13px;font-size:13px;color:var(--ink-soft)}
+      .debt-range-sum b{color:var(--ink)} .debt-range-sum .tab{font-family:'Space Grotesk';font-weight:700}
       .debt-card{display:flex;flex-direction:column;gap:12px}
       .debt-head{display:flex;justify-content:space-between;align-items:flex-start}
       .debt-id{font-family:'Space Grotesk';font-weight:700;font-size:15px}

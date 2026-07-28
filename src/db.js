@@ -233,7 +233,7 @@ export const Debts = {
     return data.map((r) => ({
       id: r.id, debtor: r.debtor, business: r.business, phone: r.phone,
       items: r.items || [], total: Number(r.total), status: r.status, date: r.date, paidAt: r.paid_at,
-      paidMethod: r.paid_method || null,
+      paidMethod: r.paid_method || null, paidShiftId: r.paid_shift_id || null,
     }));
   },
   async create(d) {
@@ -244,8 +244,13 @@ export const Debts = {
     const { error } = await supabase.from("debts").insert(row);
     if (error) throw error;
   },
-  async settle(id, paidAt, method) {
-    const { error } = await supabase.from("debts").update({ status: "lunas", paid_at: paidAt, paid_method: method ?? null }).eq("id", id);
+  async settle(id, paidAt, method, shiftId) {
+    const { error } = await supabase.from("debts").update({ status: "lunas", paid_at: paidAt, paid_method: method ?? null, paid_shift_id: shiftId ?? null }).eq("id", id);
+    if (error) throw error;
+  },
+  // Batalkan pelunasan (koreksi salah tekan) — kembalikan ke "belum" & bersihkan jejak bayar.
+  async unsettle(id) {
+    const { error } = await supabase.from("debts").update({ status: "belum", paid_at: null, paid_method: null, paid_shift_id: null }).eq("id", id);
     if (error) throw error;
   },
   async remove(id) {

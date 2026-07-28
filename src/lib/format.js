@@ -39,6 +39,47 @@ const daysUntil = (dateStr) => {
 };
 const fmtExpiry = (dateStr) =>
   dateStr ? new Date(dateStr + "T00:00:00").toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }) : "";
+// Peta nama bulan -> indeks (0..11), TOLERAN terhadap perbedaan ICU antar peramban.
+// Dibangun dua lapis: (1) dari Intl peramban ini juga — jadi selalu cocok dengan
+// singkatan yang DITULIS peramban ini saat menyimpan tanggal; (2) daftar statis
+// mencakup varian umum (Agu/Ags/Agt) + nama panjang, agar tanggal yang ditulis di
+// peramban lain tetap terbaca.
+const MONTH_INDEX = (() => {
+  const map = {};
+  const put = (name, idx) => { if (name) map[String(name).toLowerCase().replace(/\./g, "").trim()] = idx; };
+  for (let m = 0; m < 12; m++) {
+    const d = new Date(2000, m, 1);
+    try { put(d.toLocaleDateString("id-ID", { month: "short" }), m); } catch (_) {}
+    try { put(d.toLocaleDateString("id-ID", { month: "long" }), m); } catch (_) {}
+  }
+  [["jan", 0], ["januari", 0], ["feb", 1], ["februari", 1], ["mar", 2], ["maret", 2],
+   ["apr", 3], ["april", 3], ["mei", 4], ["may", 4], ["jun", 5], ["juni", 5],
+   ["jul", 6], ["juli", 6], ["agu", 7], ["ags", 7], ["agt", 7], ["agustus", 7], ["aug", 7],
+   ["sep", 8], ["sept", 8], ["september", 8], ["okt", 9], ["oct", 9], ["oktober", 9],
+   ["nov", 10], ["november", 10], ["des", 11], ["dec", 11], ["desember", 11],
+  ].forEach(([n, i]) => { if (!(n in map)) map[n] = i; });
+  return map;
+})();
+
+// Tanggal tampilan Indonesia ("28 Jul 2026" / "5 Agu 2026") -> "YYYY-MM-DD" (bisa
+// dibandingkan langsung, mis. dengan nilai <input type="date">). "" bila tak terbaca.
+// String yang sudah ISO (mengandung "YYYY-MM-DD") dikembalikan apa adanya.
+const parseIdDateYMD = (str) => {
+  if (str == null) return "";
+  const s = String(str).trim();
+  if (!s) return "";
+  const iso = s.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const parts = s.replace(/,/g, " ").split(/\s+/).filter(Boolean);
+  if (parts.length < 3) return "";
+  const day = parseInt(parts[0], 10);
+  const mo = MONTH_INDEX[parts[1].toLowerCase().replace(/\./g, "")];
+  const year = parseInt(parts[parts.length - 1], 10);
+  if (!Number.isFinite(day) || mo == null || !Number.isFinite(year)) return "";
+  if (day < 1 || day > 31 || year < 1900) return "";
+  return `${year}-${String(mo + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+};
+
 // ISO/epoch -> "YYYY-MM-DD" pada zona waktu LOKAL (agar cocok dengan tanggal yang
 // ditampilkan via toLocaleDateString; input <type=date> selalu memakai kalender lokal).
 const toLocalYMD = (v) => {
@@ -55,6 +96,7 @@ export {
   fmtAt,
   fmtExpiry,
   num,
+  parseIdDateYMD,
   periodLabel,
   prevPeriod,
   printProfile,

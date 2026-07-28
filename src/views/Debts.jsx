@@ -1,18 +1,23 @@
 import { useState } from "react";
-import { Banknote, Building2, Check, CheckCircle2, ClipboardList, Download, ExternalLink, FileText, Loader2, MessageCircle, Phone, Printer, QrCode, Share2, Trash2, User, Wallet } from "lucide-react";
+import { Banknote, Building2, Calendar, Check, CheckCircle2, ClipboardList, Download, ExternalLink, FileText, Loader2, MessageCircle, Phone, Printer, QrCode, RotateCcw, Share2, Trash2, User, Wallet, X } from "lucide-react";
 import { Modal, Stat } from "../components/ui";
-import { num, rp } from "../lib/format";
+import { num, parseIdDateYMD, rp } from "../lib/format";
 import { waLink } from "../lib/customers";
 import { buildWaText } from "../lib/waText";
 import { buildDebtInvoiceBlob } from "../lib/invoicePdf";
 
-function Debts({ debts, onSettle, onPrint, onDelete, store, flash }) {
+function Debts({ debts, onSettle, onPrint, onDelete, onUnsettle, store, flash }) {
   const [tab, setTab] = useState("belum");
   const [confirm, setConfirm] = useState(null);
   const [payMode, setPayMode] = useState("cash"); // tunai masuk laci shift; non-tunai tidak
   const [del, setDel] = useState(null); // catatan hutang yang akan dihapus (manajer)
+  const [undo, setUndo] = useState(null); // pelunasan yang akan dibatalkan (manajer)
   const [wa, setWa] = useState(null);   // { d, text } — pengingat WhatsApp per catatan
   const [pdf, setPdf] = useState(null); // { d, busy, url, file, filename, canShare, err }
+  // Filter tanggal PELUNASAN (bukan tanggal hutang). Nilai "YYYY-MM-DD" agar bisa
+  // dibandingkan langsung dengan hasil parseIdDateYMD(paidAt).
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
 
   const counts = {
     belum: debts.filter((d) => d.status === "belum").length,
@@ -20,7 +25,38 @@ function Debts({ debts, onSettle, onPrint, onDelete, store, flash }) {
     semua: debts.length,
   };
   const outstanding = debts.filter((d) => d.status === "belum").reduce((a, d) => a + d.total, 0);
-  const list = debts.filter((d) => (tab === "semua" ? true : d.status === tab));
+
+  // Rentang aktif? Bila salah satu ujung diisi, filter dianggap menyala. Karena
+  // hanya bon LUNAS yang punya tanggal pelunasan, saat filter menyala daftar otomatis
+  // menyempit ke pelunasan dalam rentang (tab "belum" tidak akan memuat apa pun).
+  const dateActive = !!(from || to);
+  const lo = from && to ? (from <= to ? from : to) : from; // toleran bila urutan terbalik
+  const hi = from && to ? (from <= to ? to : from) : to;
+  const inRange = (d) => {
+    const p = parseIdDateYMD(d.paidAt);
+    if (!p) return false;
+    if (lo && p < lo) return false;
+    if (hi && p > hi) return false;
+    return true;
+  };
+  const list = debts.filter((d) => {
+    if (tab !== "semua" && d.status !== tab) return false;
+    if (dateActive) { if (d.status !== "lunas") return false; if (!inRange(d)) return false; }
+    return true;
+  });
+  const rangeTotal = dateActive ? list.reduce((a, d) => a + d.total, 0) : 0;
+
+  // Set rentang; bila sedang di tab "belum" (yang tak punya tanggal pelunasan),
+  // pindah ke "lunas" agar hasil filter langsung terlihat — bukan layar kosong.
+  const applyDate = (nf, nt) => { setFrom(nf); setTo(nt); if ((nf || nt) && tab === "belum") setTab("lunas"); };
+  const clearDate = () => { setFrom(""); setTo(""); };
+  const ymd = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  const preset = (kind) => {
+    const now = new Date(); const t = ymd(now);
+    if (kind === "today") return applyDate(t, t);
+    if (kind === "7d") { const s = new Date(now); s.setDate(s.getDate() - 6); return applyDate(ymd(s), t); }
+    if (kind === "month") { const s = new Date(now.getFullYear(), now.getMonth(), 1); return applyDate(ymd(s), t); }
+  };
 
   // Pesan pengingat WhatsApp untuk SATU catatan hutang. Memakai templat
   // "hutang" yang sama dengan halaman Pelanggan (bisa disetel di Pengaturan →
@@ -82,8 +118,32 @@ function Debts({ debts, onSettle, onPrint, onDelete, store, flash }) {
         ))}
       </div>
 
+      {/* ============ Filter tanggal PELUNASAN ============ */}
+      <div className="debt-filter">
+        <div className="acc-period">
+          <Calendar size={15} />
+          <span className="muted">Pelunasan</span>
+          <input type="date" value={from} max={to || undefined} onChange={(e) => applyDate(e.target.value, to)} />
+          <span className="muted">–</span>
+          <input type="date" value={to} min={from || undefined} onChange={(e) => applyDate(from, e.target.value)} />
+        </div>
+        <div className="chips">
+          <button type="button" className="chip" onClick={() => preset("today")}>Hari ini</button>
+          <button type="button" className="chip" onClick={() => preset("7d")}>7 hari</button>
+          <button type="button" className="chip" onClick={() => preset("month")}>Bulan ini</button>
+          {dateActive && <button type="button" className="chip" onClick={clearDate}><X size={13} /> Hapus filter</button>}
+        </div>
+      </div>
+      {dateActive && (
+        <div className="debt-range-sum">
+          <Wallet size={14} />
+          <span><b>{num(list.length)}</b> pelunasan pada rentang ini · total <b className="tab">{rp(rangeTotal)}</b></span>
+          {tab === "belum" && <span className="muted xs">Filter tanggal pelunasan hanya berlaku untuk hutang yang sudah lunas.</span>}
+        </div>
+      )}
+
       <div className="order-grid">
-        {list.length === 0 && <div className="empty card">Tidak ada data pada status ini.</div>}
+        {list.length === 0 && <div className="empty card">{dateActive ? "Tidak ada pelunasan pada rentang tanggal ini." : "Tidak ada data pada status ini."}</div>}
         {list.map((d) => (
           <div key={d.id} className="card debt-card">
             <div className="debt-head">
@@ -122,9 +182,16 @@ function Debts({ debts, onSettle, onPrint, onDelete, store, flash }) {
                 {d.status === "belum" && d.phone && (
                   <button className="btn wa sm" title="Ingatkan tagihan lewat WhatsApp" onClick={() => openWa(d)}><MessageCircle size={14} /> WhatsApp</button>
                 )}
-                {d.status === "belum"
-                  ? <button className="btn sm" onClick={() => { setPayMode("cash"); setConfirm(d); }}><CheckCircle2 size={15} /> Lunas</button>
-                  : <span className="done-tag"><Check size={14} /> {d.paidAt}</span>}
+                {d.status === "belum" ? (
+                  <button className="btn sm" onClick={() => { setPayMode("cash"); setConfirm(d); }}><CheckCircle2 size={15} /> Lunas</button>
+                ) : (
+                  <>
+                    <span className="done-tag"><Check size={14} /> {d.paidAt}</span>
+                    {onUnsettle && (
+                      <button className="btn ghost xs" title="Batalkan pelunasan — kembalikan ke Belum Lunas (koreksi salah tekan)" onClick={() => setUndo(d)}><RotateCcw size={14} /> Batalkan lunas</button>
+                    )}
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -250,6 +317,42 @@ function Debts({ debts, onSettle, onPrint, onDelete, store, flash }) {
               Menghapus catatan ini <b>tidak</b> mengembalikan stok atau menghapus penjualannya. Jika seluruh transaksinya
               salah input, hapus transaksinya lewat halaman <b>Riwayat Penjualan</b> (stok kembali otomatis), lalu hapus catatan ini.
             </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ===================== Batalkan pelunasan (manajer) ===================== */}
+      <Modal
+        open={!!undo}
+        onClose={() => setUndo(null)}
+        title="Batalkan pelunasan?"
+        footer={
+          <>
+            <button className="btn ghost" onClick={() => setUndo(null)}>Batal</button>
+            <button className="btn danger" onClick={() => { onUnsettle(undo.id); setUndo(null); }}><RotateCcw size={15} /> Ya, batalkan pelunasan</button>
+          </>
+        }
+      >
+        {undo && (
+          <div className="confirm-text">
+            <p style={{ margin: "0 0 8px" }}>
+              Hutang <b>{undo.id}</b> dari <b>{undo.debtor}{undo.business ? ` (${undo.business})` : ""}</b> sebesar{" "}
+              <b>{rp(undo.total)}</b> akan dikembalikan ke status <b>Belum Lunas</b>.
+              {undo.paidAt && <> Tanggal pelunasan <b>{undo.paidAt}</b> akan dihapus.</>}
+            </p>
+            {undo.paidMethod === "cash" ? (
+              <div className="pay-note warn">
+                Pelunasan ini tercatat <b>TUNAI</b>. Saat ditandai lunas, <b>{rp(undo.total)}</b> ikut dihitung sebagai
+                <b> kas masuk laci</b> pada shift saat itu. Membatalkan di sini <b>tidak</b> otomatis menarik angka tersebut
+                dari shift itu: bila shift masih berjalan, sesuaikan kasnya; bila sudah ditutup, catatannya terkunci dan
+                selisihnya perlu dicocokkan manual. Uang tunainya memang belum benar-benar diterima.
+              </div>
+            ) : (
+              <div className="pay-note">
+                Pelunasan ini {undo.paidMethod === "noncash" ? "tercatat non-tunai (transfer/QRIS)" : "tidak menyentuh kas laci"},
+                jadi pembatalan ini tidak berpengaruh ke cocokan kas shift.
+              </div>
+            )}
           </div>
         )}
       </Modal>

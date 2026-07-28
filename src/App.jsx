@@ -1219,13 +1219,16 @@ export default function App() {
   };
   const settleDebt = (id, method = "cash") => {
     const d = debts.find((x) => x.id === id);
-    setDebts((ds) => ds.map((x) => (x.id === id ? { ...x, status: "lunas", paidAt: today, paidMethod: method } : x)));
-    persist(() => DebtsApi.settle(id, today, method));
     // Pelunasan bon TUNAI = uang masuk laci. Tanpa pencatatan ini, kas fisik akan
     // "lebih" dari hitungan sistem saat tutup shift dan selisihnya bisa dikantongi
     // tanpa ketahuan. Dicatat ke shift yang sedang buka (server ikut menghitungnya
-    // dalam "seharusnya di laci").
-    if (method === "cash" && role === "cashier" && shift?.id) {
+    // dalam "seharusnya di laci"). Shift itu DISIMPAN di bon (paidShiftId) sebagai
+    // jejak audit — bila pelunasan dibatalkan, jelas ke shift mana kas tadi masuk.
+    const cashToShift = method === "cash" && role === "cashier" && !!shift?.id;
+    const paidShiftId = cashToShift ? shift.id : null;
+    setDebts((ds) => ds.map((x) => (x.id === id ? { ...x, status: "lunas", paidAt: today, paidMethod: method, paidShiftId } : x)));
+    persist(() => DebtsApi.settle(id, today, method, paidShiftId));
+    if (cashToShift) {
       const amt = Number(d?.total) || 0;
       if (amt > 0) {
         setShiftCashMoves((ms) => [...ms, { type: "in", amount: amt, note: `Pelunasan bon ${id}` }]);
@@ -1233,6 +1236,16 @@ export default function App() {
       }
     }
     flash("Hutang ditandai lunas");
+  };
+  // Batalkan pelunasan (koreksi salah tekan) — HANYA manajer. Mengembalikan bon ke
+  // "Belum Lunas" dan membersihkan jejak bayar. Sengaja TIDAK mengutak-atik kas shift
+  // secara otomatis: manajer tidak sedang memegang shift kasir mana pun, dan mengubah
+  // shift orang lain (apalagi yang sudah ditutup & terkunci) berisiko merusak cocokan
+  // kas. Konsekuensi kas ditegaskan di dialog konfirmasi agar bisa direkonsiliasi manual.
+  const unsettleDebt = (id) => {
+    setDebts((ds) => ds.map((x) => (x.id === id ? { ...x, status: "belum", paidAt: null, paidMethod: null, paidShiftId: null } : x)));
+    persist(() => DebtsApi.unsettle(id));
+    flash("Pelunasan dibatalkan — hutang kembali ke Belum Lunas");
   };
   const deleteDebt = (id) => {
     setDebts((ds) => ds.filter((d) => d.id !== id));
@@ -1683,7 +1696,7 @@ export default function App() {
           )}
           {view === "hutang" && (
             <Debts debts={debts} onSettle={settleDebt} onPrint={(d) => triggerPrint(debtToReceipt(d))}
-              onDelete={managerMode ? deleteDebt : null} store={store} flash={flash} />
+              onDelete={managerMode ? deleteDebt : null} onUnsettle={managerMode ? unsettleDebt : null} store={store} flash={flash} />
           )}
           {view === "pelanggan" && (
             <CustomersView
