@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Bell, Check, ChevronDown, Lock, LogOut, Menu, Moon, Printer, Settings, ShieldCheck, ShoppingCart, Sun } from "lucide-react";
+import { Bell, Check, ChevronDown, Lock, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, Printer, Settings, ShieldCheck, ShoppingCart, Sun } from "lucide-react";
 import { Auth, Capital, CashDeposits, Consign, Customers as CustomersApi, Debts as DebtsApi, Expenses, Movements, Orders as OrdersApi, Products, Profiles, Returns as ReturnsApi, Sales, Settings as SettingsApi, Shifts } from "./db";
 import { hasSupabase } from "./supabaseClient";
 import { LOGO } from "./assets/logo";
@@ -42,6 +42,15 @@ const loadTheme = () => {
   catch (e) { return "dark"; }
 };
 
+// Sidebar diciutkan jadi rel ikon (mode "rail") — preferensi per-perangkat.
+// Bawaan: diciutkan, supaya layar kerja lebih lega. Hanya berlaku di laptop/
+// desktop ber-mouse; di tablet & HP sidebar tetap laci geser berlabel penuh.
+const RAIL_KEY = "conflux.rail.v1";
+const loadRail = () => {
+  try { return localStorage.getItem(RAIL_KEY) !== "0"; }
+  catch (e) { return true; }
+};
+
 export default function App() {
   const [view, setView] = useState("dashboard");
   const [products, setProducts] = useState(SEED_PRODUCTS);
@@ -59,6 +68,13 @@ export default function App() {
   const [custVisits, setCustVisits] = useState([]); // buku kunjungan: 1 baris / transaksi
   const [toast, setToast] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Sidebar mode rel ikon (laptop/desktop). Pilihannya diingat di perangkat ini.
+  const [railed, setRailed] = useState(loadRail);
+  const toggleRail = () => setRailed((r) => {
+    const next = !r;
+    try { localStorage.setItem(RAIL_KEY, next ? "1" : "0"); } catch (e) {}
+    return next;
+  });
   // Sidebar sebagai dropdown: tiap kategori bisa dibuka/ditutup agar daftar tidak
   // terlalu panjang. Awalnya hanya grup yang memuat halaman aktif yang terbuka.
   const [openGroups, setOpenGroups] = useState(() => {
@@ -1438,7 +1454,7 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app ${railed ? "railed" : ""}`}>
       <Style />
 
       {sidebarOpen && <div className="drawer-scrim" onClick={() => setSidebarOpen(false)} />}
@@ -1483,6 +1499,7 @@ export default function App() {
                       <button
                         key={n.key}
                         className={`nav-item ${active ? "active" : ""}`}
+                        title={n.label} /* tooltip: satu-satunya penanda saat sidebar diciutkan jadi rel ikon */
                         onClick={() => { setView(n.key); setSidebarOpen(false); }}
                       >
                         <Icon size={18} strokeWidth={2} />
@@ -1498,19 +1515,32 @@ export default function App() {
         </nav>
 
         <div className="sidebar-foot">
-          <div className={`role-badge ${role}`}>
+          {/* Label dibungkus <span> agar bisa disembunyikan di mode rel ikon —
+              ikonnya tetap tampil, judul lengkapnya jadi tooltip. */}
+          <div className={`role-badge ${role}`} title={role === "manager" ? "Mode Manajer" : `Kasir: ${cashierName || "—"}`}>
             {role === "manager" ? <ShieldCheck size={14} /> : <ShoppingCart size={14} />}
-            {role === "manager" ? "Mode Manajer" : `Kasir: ${cashierName || "—"}`}
+            <span className="role-label">{role === "manager" ? "Mode Manajer" : `Kasir: ${cashierName || "—"}`}</span>
           </div>
-          <button className="logout-btn" onClick={requestLogout}><LogOut size={15} /> Keluar / ganti</button>
+          <button className="logout-btn" onClick={requestLogout} title="Keluar / ganti pengguna">
+            <LogOut size={15} /> <span className="logout-label">Keluar / ganti</span>
+          </button>
         </div>
       </aside>
 
       <main className="main">
         <header className="topbar">
-          <button className="icon-btn only-mobile" onClick={() => setSidebarOpen(true)}>
+          {/* Tablet/HP: hamburger membuka laci. Laptop/desktop: tombol panel
+              menciutkan sidebar jadi rel ikon (atau membentangkannya lagi). */}
+          <button className="icon-btn only-mobile" onClick={() => setSidebarOpen(true)} title="Buka menu" aria-label="Buka menu">
             <Menu size={20} />
           </button>
+          <button
+            className="icon-btn only-desktop"
+            onClick={toggleRail}
+            title={railed ? "Bentangkan menu" : "Ciutkan menu"}
+            aria-label={railed ? "Bentangkan menu" : "Ciutkan menu"}
+            aria-pressed={railed}
+          >{railed ? <PanelLeftOpen size={19} /> : <PanelLeftClose size={19} />}</button>
           <div className="topbar-title">
             <h1>{NAV.find((n) => n.key === view)?.label}</h1>
           </div>
@@ -1536,7 +1566,9 @@ export default function App() {
           </div>
         </header>
 
-        <div className="content">
+        {/* Layar kasir memakai lebar penuh: keranjang sudah pindah ke pop-up,
+            jadi seluruh ruang bisa dipakai untuk grid barang. */}
+        <div className={`content ${view === "kasir" || view === "backdate" ? "wide" : ""}`}>
           <SyncBanner
             online={online} syncing={syncing} pending={pendingCount} dead={deadCount} diag={syncDiag}
             onRetry={flushOutbox}

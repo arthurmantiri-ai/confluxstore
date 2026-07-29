@@ -93,8 +93,11 @@ function Style() {
         *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;
           transition-duration:.001ms !important;scroll-behavior:auto !important}
       }
+      /* --side-w = lebar sidebar SAAT INI (248px normal / 72px mode rail / 0 saat
+         jadi laci geser). Dipakai elemen position:fixed (mis. bilah keranjang)
+         agar tidak pernah menimpa sidebar, berapa pun lebarnya. */
       .app{font-family:'Inter',system-ui,sans-serif;color:var(--ink);background:var(--bg);
-        min-height:100vh;display:flex;-webkit-font-smoothing:antialiased}
+        min-height:100vh;display:flex;-webkit-font-smoothing:antialiased;--side-w:248px}
       h1,h2,h3{font-family:'Space Grotesk',sans-serif;letter-spacing:-0.01em}
       .tab,.tabular{font-variant-numeric:tabular-nums}
       .muted{color:var(--ink-soft)} .xs{font-size:12px} .strong{font-weight:600}
@@ -104,8 +107,9 @@ function Style() {
       .accent{color:var(--accent)} .danger{color:var(--crit)} .warn-text{color:var(--warn);font-weight:600;font-size:12px}
 
       /* sidebar */
-      .sidebar{width:248px;flex-shrink:0;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;padding:18px 14px;
-        border-right:1px solid var(--line);
+      .sidebar{width:var(--side-w);flex-shrink:0;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;padding:18px 14px;
+        border-right:1px solid var(--line);overflow:hidden;
+        transition:width .22s var(--ease),padding .22s var(--ease);
         background:
           radial-gradient(135% 48% at 0% 0%, rgba(226,81,77,.10), transparent 56%),
           radial-gradient(120% 40% at 100% 100%, rgba(111,174,146,.07), transparent 60%),
@@ -174,6 +178,9 @@ function Style() {
         border:1px solid rgba(224,165,60,.32);padding:7px 13px;border-radius:999px;font:inherit;font-size:13px;
         font-weight:600;cursor:pointer}
       .content{padding:26px;max-width:1240px;width:100%}
+      /* Layar kasir: keranjang sudah pindah ke pop-up, jadi grid barang boleh
+         memakai lebar penuh — makin banyak kartu terlihat sekali pandang. */
+      .content.wide{max-width:1700px}
       .stack{display:flex;flex-direction:column;gap:20px}
 
       /* cards */
@@ -534,11 +541,17 @@ function Style() {
       .stepper input{border:none;width:64px;text-align:center;font:inherit;font-size:15px;font-weight:600;outline:none}
       .stepper.sm button{width:28px;height:28px} .stepper.sm span{min-width:26px;text-align:center;font-weight:600;font-size:13.5px}
 
-      /* POS */
-      .pos-screen{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:20px;height:calc(100vh - 64px - 52px)}
-      .pos-products{display:flex;flex-direction:column;gap:14px;min-height:0;min-width:0}
+      /* ============================== POS / Kasir ==============================
+         Layar kasir kini SATU kolom penuh untuk barang. Keranjang, pelanggan, dan
+         pembayaran pindah ke pop-up (lihat blok "Pop-up keranjang" di bawah) agar
+         layar tidak penuh dan kasir lebih leluasa memilih barang. Ruang di dasar
+         disisakan untuk bilah keranjang yang selalu menempel. */
+      .pos-screen{display:flex;flex-direction:column;gap:12px;min-height:0;
+        height:calc(100vh - 64px - 52px);height:calc(100dvh - 64px - 52px);padding-bottom:88px}
+      .pos-products{display:flex;flex-direction:column;gap:12px;min-height:0;min-width:0;flex:1 1 auto}
       .pos-products .search{flex:0 0 auto}
-      .pos-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px;overflow-y:auto;padding-right:4px;align-content:start;flex:1 1 auto;min-height:0;min-width:0}
+      .pos-count{flex:0 0 auto;font-size:12px;color:var(--ink-faint);padding:0 2px;margin-top:-2px}
+      .pos-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(172px,1fr));gap:12px;overflow-y:auto;padding-right:4px;align-content:start;flex:1 1 auto;min-height:0;min-width:0}
       .pos-empty{grid-column:1/-1;align-self:start}
       .cat-tabs{display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;flex:0 0 auto;scrollbar-width:none}
       .cat-tabs::-webkit-scrollbar{display:none}
@@ -552,6 +565,12 @@ function Style() {
         border-radius:var(--r-sm);padding:14px;display:flex;flex-direction:column;gap:7px;transition:transform .18s var(--ease),box-shadow .18s var(--ease),border-color .18s var(--ease)}
       .pos-card:hover{transform:translateY(-2px);box-shadow:var(--shadow);border-color:rgba(236,231,218,.16)}
       .pos-card.out{opacity:.5}
+      /* Sudah masuk keranjang: kartu ditandai + lencana jumlah, supaya kasir tahu
+         apa saja yang sudah diambil TANPA harus membuka pop-up keranjang. */
+      .pos-card.in-cart{border-color:rgba(226,81,77,.45);box-shadow:inset 0 0 0 1px var(--accent-soft)}
+      .pos-incart{position:relative;z-index:1;flex-shrink:0;display:inline-flex;align-items:center;gap:3px;
+        padding:2px 8px;border-radius:999px;background:var(--accent);color:#fff;
+        font-family:'Space Grotesk';font-size:11px;font-weight:700;white-space:nowrap}
       .pos-card-wm{position:absolute;right:8px;top:34px;color:var(--ink);opacity:.045;pointer-events:none;z-index:0}
       .pos-card-top{display:flex;justify-content:space-between;align-items:center;gap:6px;position:relative;z-index:1}
       .pos-cat{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:var(--ink-faint);font-weight:600;text-transform:uppercase;letter-spacing:.04em;min-width:0}
@@ -591,10 +610,46 @@ function Style() {
       .switch .knob{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:.18s;box-shadow:0 1px 3px rgba(0,0,0,.25)}
       .switch.on .knob{left:21px}
 
-      .cart{background:linear-gradient(180deg,var(--surface-3),var(--surface));border:1px solid var(--line);
-        border-radius:var(--r);display:flex;flex-direction:column;min-height:0;box-shadow:var(--shadow)}
-      .cart-head{display:flex;align-items:center;gap:9px;padding:16px 18px;border-bottom:1px solid var(--line-soft);font-weight:600;font-size:15px}
-      .cart-count{margin-left:auto;background:var(--accent-soft);color:var(--accent);font-size:12px;font-weight:700;padding:2px 9px;border-radius:999px;animation:pulse-badge .4s var(--ease)}
+      /* ========================= Pop-up keranjang & bayar =========================
+         Keranjang, data pelanggan, dan pembayaran TIDAK lagi memakan kolom tetap di
+         layar kasir — semuanya masuk satu pop-up yang dipanggil dari bilah keranjang
+         di dasar layar. Di laptop pop-up tampil di tengah (2 kolom: barang | bayar),
+         di tablet/HP naik dari bawah sebagai lembar (1 kolom).
+         Menutup pop-up TIDAK pernah menghapus keranjang — kasir bebas keluar-masuk
+         untuk menambah barang saat pelanggan berubah pikiran. */
+      .cart-pop{position:fixed;z-index:70;left:50%;top:50%;
+        width:min(1060px,calc(100vw - 48px));max-height:calc(100vh - 56px);max-height:calc(100dvh - 56px);
+        display:flex;flex-direction:column;overflow:hidden;
+        background:linear-gradient(180deg,var(--surface-3),var(--surface));
+        border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-lg);
+        transform:translate(-50%,-47%) scale(.985);opacity:0;visibility:hidden;pointer-events:none;
+        transition:opacity .2s var(--ease),transform .24s var(--ease),visibility 0s linear .24s}
+      .cart-pop.on{transform:translate(-50%,-50%) scale(1);opacity:1;visibility:visible;pointer-events:auto;
+        transition:opacity .18s var(--ease),transform .24s var(--ease),visibility 0s}
+      .sheet-scrim{position:fixed;inset:0;z-index:65;background:rgba(8,12,10,.55);
+        backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);animation:scrim-in .2s ease}
+      .cart-head{flex:0 0 auto;display:flex;align-items:center;gap:9px;padding:15px 16px 15px 18px;
+        border-bottom:1px solid var(--line-soft);font-weight:600;font-size:15px}
+      .cart-count{background:var(--accent-soft);color:var(--accent);font-size:12px;font-weight:700;padding:2px 9px;border-radius:999px;animation:pulse-badge .4s var(--ease)}
+      .cart-x{margin-left:auto;flex-shrink:0}
+      .cart-x:hover{background:var(--crit-bg);color:var(--crit)}
+      /* isi: 2 kolom di layar lebar (barang | pelanggan+bayar) */
+      .cart-body{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,400px);overflow:hidden}
+      .cart-pane{min-height:0;min-width:0;overflow-y:auto;overscroll-behavior:contain;padding:12px 16px 16px;
+        display:flex;flex-direction:column;gap:10px}
+      .cart-pane.pay{border-left:1px solid var(--line);background:var(--surface)}
+      .cart-pane.items .cart-empty{padding:32px 12px}
+      .pane-title{font-size:10.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);
+        padding:2px 2px 0}
+      /* kaki tetap: total, alasan tombol bayar mati, tombol kembali & bayar */
+      .cart-act{flex:0 0 auto;border-top:1px solid var(--line);padding:13px 18px;display:flex;flex-direction:column;gap:9px;
+        background:var(--surface)}
+      .cart-act-row{display:flex;gap:10px;align-items:stretch}
+      .cart-act-row .btn.pay{flex:1;margin-top:0}
+      .cart-back{flex:0 0 auto;white-space:nowrap}
+      .cart-block{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:var(--warn);
+        background:var(--warn-bg);border-radius:9px;padding:8px 11px;line-height:1.35}
+      .cart-block svg{flex-shrink:0}
       @keyframes pulse-badge{0%{transform:scale(1)}40%{transform:scale(1.35);background:var(--accent);color:#fff}100%{transform:scale(1)}}
       .cart-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;text-align:center;padding:48px 18px;color:var(--teal)}
       .cart-empty svg{color:var(--teal);opacity:.5;margin-bottom:6px}
@@ -602,14 +657,14 @@ function Style() {
       .cart-empty svg .steam:nth-child(2){animation-delay:.5s}
       @keyframes steam{0%,100%{opacity:.15;transform:translateY(2px)}50%{opacity:.55;transform:translateY(-2px)}}
       .cart-empty-title{font-weight:600;font-size:14px;color:var(--ink-soft)}
-      .cart-empty-sub{font-size:12.5px;color:var(--ink-faint);max-width:200px;line-height:1.4}
-      .cart-lines{flex:1;overflow-y:auto;padding:8px 14px}
+      .cart-empty-sub{font-size:12.5px;color:var(--ink-faint);max-width:260px;line-height:1.45}
+      .cart-empty .btn{margin-top:10px}
+      .cart-lines{display:flex;flex-direction:column}
       .cart-line{display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line-soft)}
       .cart-line:last-child{border-bottom:none}
       .cart-line-info{min-width:0}
       .cart-line-name{font-weight:600;font-size:13px;line-height:1.2;overflow-wrap:anywhere}
       .cart-line-total{font-weight:600;font-size:13px;min-width:64px;text-align:right}
-      .cart-foot{border-top:1px solid var(--line);padding:16px 18px;display:flex;flex-direction:column;gap:10px}
       .cart-total{display:flex;justify-content:space-between;align-items:baseline}
       .cart-total .big{font-family:'Space Grotesk';font-size:22px;font-weight:700;color:var(--ink);display:inline-block;animation:total-bump .28s var(--ease)}
       @keyframes total-bump{0%{transform:scale(1)}35%{transform:scale(1.12);color:var(--accent)}100%{transform:scale(1)}}
@@ -1001,19 +1056,53 @@ function Style() {
            font kolom isian dipaksa 16px agar Safari iOS TIDAK auto-zoom halaman
            saat kolom difokus (penyebab utama harus "zoom in/zoom out" di tablet).
          • Lebar ≤980px → POS & grid ringkasan turun ke 1 kolom (murni soal ruang).
-         Desktop layar besar + mouse (>1024px) TIDAK berubah sama sekali. */
+         • Laptop/desktop (>1024px + mouse) → sidebar bisa DICIUTKAN jadi rel ikon
+           (mode "rail", lihat blok di bawah) agar tampilan lebih lega. */
       .only-mobile{display:none}
+      .only-desktop{display:grid}
       .drawer-scrim{display:none}
 
       /* -- Sidebar → laci geser + hamburger: semua perangkat sentuh & jendela sempit -- */
       @media (pointer:coarse),(max-width:1024px){
-        .sidebar{position:fixed;left:0;top:0;z-index:60;transform:translateX(-100%);
+        /* Sebagai laci, sidebar TIDAK ikut mode rail: lebarnya tetap penuh dan
+           label menu tetap tampil (di layar sentuh tidak ada tooltip hover). */
+        .app,.app.railed{--side-w:0px}
+        .sidebar{width:272px;max-width:86vw;position:fixed;left:0;top:0;z-index:60;transform:translateX(-100%);
           transition:transform .25s var(--ease);box-shadow:0 0 44px rgba(0,0,0,.4)}
         .sidebar.open{transform:translateX(0)}
         .drawer-scrim{display:block;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:55}
         .only-mobile{display:grid}
+        .only-desktop{display:none}
         .topbar{padding:0 16px}
         .content{padding:18px 16px}
+      }
+
+      /* ================= Sidebar mode "rail" (laptop/desktop + mouse) =================
+         Ditoggle dari tombol panel di topbar; pilihannya diingat per perangkat.
+         Menu tetap SATU klik — hanya labelnya yang disembunyikan dan diganti
+         tooltip saat kursor menyentuh ikon. Judul kategori ikut disembunyikan,
+         jadi seluruh menu terlihat sebagai deret ikon tanpa perlu dibuka dulu. */
+      @media (min-width:1025px) and (pointer:fine){
+        .app.railed{--side-w:72px}
+        .app.railed .sidebar{padding:16px 10px}
+        .app.railed .brand{justify-content:center;padding:2px 0 14px}
+        .app.railed .brand::after{left:6px;right:6px}
+        .app.railed .brand-logo{width:40px;height:40px}
+        .app.railed .brand-text{display:none}
+        .app.railed .nav{gap:2px}
+        .app.railed .nav-group-title{display:none}
+        .app.railed .nav-group{padding-top:7px;margin-top:7px;border-top:1px solid rgba(236,231,218,.08)}
+        .app.railed .nav-group:first-child{padding-top:0;margin-top:0;border-top:none}
+        /* Semua grup dipaksa terbuka: tanpa judul, tidak ada cara membukanya. */
+        .app.railed .nav-group-items{max-height:none;opacity:1;pointer-events:auto}
+        .app.railed .nav-item{justify-content:center;padding:11px 0;gap:0}
+        .app.railed .nav-item>span:not(.nav-badge){display:none}
+        .app.railed .nav-badge{position:absolute;top:3px;right:7px;margin-left:0;min-width:16px;height:16px;
+          font-size:10px;padding:0 4px}
+        .app.railed .sidebar-foot{padding-top:11px}
+        .app.railed .role-badge{justify-content:center;padding:9px 0;gap:0}
+        .app.railed .logout-btn{justify-content:center;padding:10px 0;gap:0}
+        .app.railed .role-label,.app.railed .logout-label{display:none}
       }
 
       /* -- Anti auto-zoom iOS + sasaran ketuk lebih besar (utamanya layar kasir) -- */
@@ -1058,63 +1147,65 @@ function Style() {
         .order-grid,.slog-list{grid-template-columns:1fr}
       }
 
-      /* ================= Keranjang: lembar bawah (bottom sheet) =================
-         Aktif pada layar sempit (≤980px) DAN pada semua perangkat sentuh
-         (pointer:coarse) — termasuk tablet dalam posisi landscape yang lebarnya
-         >980px — mengikuti logika yang sama dengan laci sidebar. Bilah ringkas
-         berisi total SELALU menempel di dasar layar; ketuk untuk membuka lembar
-         penuh. Di dalam lembar, kepala (grip + judul) dan kaki (Total + tombol
-         Bayar) DIPATOK — hanya daftar barang yang menggulir — jadi tombol Bayar
-         selalu terlihat tanpa perlu scroll. Desktop pointer halus (>980px) tetap
-         memakai keranjang kolom samping. */
-      .cart-bar{display:none}
-      .sheet-scrim{display:none}
+      /* ==================== Bilah keranjang (selalu menempel) ====================
+         Ringkasan keranjang + total SELALU terlihat di dasar layar kasir, di semua
+         ukuran layar. Ketuk/klik untuk membuka pop-up keranjang & pembayaran.
+         left:var(--side-w) menjaga bilah tidak pernah menimpa sidebar. */
+      .cart-bar{display:flex;position:fixed;left:var(--side-w);right:0;bottom:0;z-index:40;
+        align-items:center;gap:12px;border:none;text-align:left;font:inherit;color:var(--ink);
+        padding:11px 20px calc(11px + env(safe-area-inset-bottom,0px));cursor:pointer;
+        transition:left .22s var(--ease),background .15s;
+        background:linear-gradient(180deg,var(--surface-2),var(--surface));
+        border-top:1px solid var(--line);box-shadow:0 -6px 22px rgba(0,0,0,.32)}
+      .cart-bar:hover:not(:disabled){background:var(--surface-3)}
+      .cart-bar:active:not(:disabled){background:var(--surface-3)}
+      .cart-bar:disabled{cursor:default;opacity:.9}
+      .cart-bar-ic{position:relative;display:grid;place-items:center;width:42px;height:42px;flex:0 0 42px;
+        border-radius:var(--r-sm);background:var(--accent-soft);color:var(--accent)}
+      .cart-bar-count{position:absolute;top:-5px;right:-5px;min-width:19px;height:19px;padding:0 5px;
+        border-radius:10px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;
+        display:grid;place-items:center;box-shadow:var(--shadow-accent)}
+      .cart-bar-mid{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+      .cart-bar-total{font-family:'Space Grotesk';font-weight:700;font-size:19px;line-height:1.1}
+      .cart-bar-label{font-size:12px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .cart-bar-empty{font-size:14px;font-weight:600;color:var(--ink-soft)}
+      .cart-bar-cta{flex:0 0 auto;display:inline-flex;align-items:center;gap:7px;background:var(--accent);color:#fff;
+        border-radius:999px;padding:10px 18px;font-size:13.5px;font-weight:700;box-shadow:var(--shadow-accent)}
+      .cart-bar:disabled .cart-bar-cta{display:none}
+      .cart-bar-caret{display:none;color:var(--ink-faint);flex:0 0 auto}
+      /* pegangan tarik (grip) — hanya berguna pada lembar bawah (layar sentuh) */
       .sheet-close{display:none}
+
+      /* ============ Pop-up keranjang → lembar bawah di tablet & HP ============
+         Pada perangkat sentuh atau layar ≤980px, pop-up naik dari dasar layar
+         sebagai lembar 1 kolom: kepala & kaki (Total + Bayar + Tambah barang)
+         DIPATOK, hanya isinya yang menggulir — tombol Bayar tak pernah hilang. */
       @media (pointer:coarse),(max-width:980px){
-        /* POS jadi 1 kolom di sini juga (bukan hanya soal lebar) supaya tidak ada
-           kolom 360px kosong saat keranjang berpindah ke lembar bawah. */
-        .pos-screen{grid-template-columns:minmax(0,1fr);height:auto}
-        /* ruang di dasar agar bilah tetap tidak menutupi baris produk terakhir */
-        .pos-screen{padding-bottom:80px}
+        .pos-screen{height:auto;padding-bottom:86px}
+        .cart-bar{padding-left:16px;padding-right:16px}
+        .cart-bar-cta span{display:none}
+        .cart-bar-cta{padding:10px 13px}
+        .cart-bar-caret{display:block}
 
-        /* bilah ringkas tetap di bawah — selalu tampak */
-        .cart-bar{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:40;
-          align-items:center;gap:12px;width:100%;border:none;text-align:left;font:inherit;color:var(--ink);
-          padding:11px 16px calc(11px + env(safe-area-inset-bottom,0px));cursor:pointer;
-          background:linear-gradient(180deg,var(--surface-2),var(--surface));
-          border-top:1px solid var(--line);box-shadow:0 -6px 22px rgba(0,0,0,.32)}
-        .cart-bar:active:not(:disabled){background:var(--surface-3)}
-        .cart-bar:disabled{cursor:default;opacity:.9}
-        .cart-bar-ic{position:relative;display:grid;place-items:center;width:42px;height:42px;flex:0 0 42px;
-          border-radius:var(--r-sm);background:var(--accent-soft);color:var(--accent)}
-        .cart-bar-count{position:absolute;top:-5px;right:-5px;min-width:19px;height:19px;padding:0 5px;
-          border-radius:10px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;
-          display:grid;place-items:center;box-shadow:var(--shadow-accent)}
-        .cart-bar-mid{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
-        .cart-bar-total{font-family:'Space Grotesk';font-weight:700;font-size:19px;line-height:1.1}
-        .cart-bar-label{font-size:12px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        .cart-bar-empty{font-size:14px;font-weight:600;color:var(--ink-soft)}
-        .cart-bar-caret{color:var(--ink-faint);flex:0 0 auto}
+        .cart-pop{left:0;right:0;bottom:0;top:auto;width:auto;
+          max-height:94vh;max-height:94dvh;border-radius:var(--r-lg) var(--r-lg) 0 0;
+          transform:translateY(101%);transition:transform .28s var(--ease),visibility 0s linear .28s;
+          opacity:1;box-shadow:0 -14px 48px rgba(0,0,0,.5)}
+        .cart-pop.on{transform:translateY(0);transition:transform .28s var(--ease),visibility 0s}
+        /* satu kolom: seluruh isi menggulir bersama */
+        .cart-body{grid-template-columns:minmax(0,1fr);overflow-y:auto;overscroll-behavior:contain}
+        .cart-pane{overflow:visible;padding:10px 14px 14px}
+        .cart-pane.pay{border-left:none;border-top:1px solid var(--line)}
+        .cart-act{padding:12px 14px calc(12px + env(safe-area-inset-bottom,0px))}
 
-        /* scrim gelap di belakang lembar */
-        .sheet-scrim{display:block;position:fixed;inset:0;z-index:65;background:rgba(8,12,10,.55);
-          backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);animation:scrim-in .2s ease}
-
-        /* keranjang → lembar yang naik dari bawah; kepala & kaki dipatok, isi menggulir */
-        .cart{position:fixed;left:0;right:0;bottom:0;z-index:70;
-          max-height:92vh;max-height:92dvh;overflow:hidden;
-          border-radius:var(--r-lg) var(--r-lg) 0 0;transform:translateY(101%);
-          transition:transform .28s var(--ease);box-shadow:0 -14px 48px rgba(0,0,0,.5)}
-        .cart.sheet-open{transform:translateY(0)}
-        .cart-head{flex:0 0 auto}
-        .cart-lines{flex:1 1 auto;min-height:48px;overflow-y:auto;overscroll-behavior:contain}
-        .cart-foot{flex:0 0 auto;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))}
-
-        /* pegangan tarik (grip) + area ketuk untuk menutup di puncak lembar */
         .sheet-close{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:100%;
-          border:none;background:none;padding:10px 0 3px;cursor:pointer}
-        .sheet-grip{display:block;width:42px;height:5px;border-radius:3px;background:var(--line);transition:background .15s}
-        .sheet-close:active .sheet-grip{background:var(--ink-faint)}
+          padding:10px 0 2px;pointer-events:none}
+        .sheet-grip{display:block;width:42px;height:5px;border-radius:3px;background:var(--line)}
+      }
+      /* HP kecil: tombol "Tambah barang" cukup ikonnya saja agar tombol Bayar lega */
+      @media (max-width:520px){
+        .cart-back span{display:none}
+        .cart-back{padding-left:14px;padding-right:14px}
       }
 
       /* ===== Retur & Tukar ===== */

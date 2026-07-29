@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Building2, CalendarClock, Check, ChevronUp, Clock, LayoutGrid, Minus, Phone, Plus, Repeat, Search, ShoppingCart, Trash2, User, UserPlus, Users, Wallet, X } from "lucide-react";
+import { AlertTriangle, Building2, CalendarClock, Check, ChevronLeft, ChevronUp, Clock, LayoutGrid, Minus, Phone, Plus, Repeat, Search, ShoppingCart, Trash2, User, UserPlus, Users, Wallet, X } from "lucide-react";
 import { cfgKasir } from "../lib/config";
 import { PAY_LABEL, PAY_METHODS, SPLIT_METHODS, catIcon } from "../lib/constants";
 import { custLabel, custSub, custTitle, isBiz, normPhone } from "../lib/customers";
@@ -223,9 +223,74 @@ function Kasir({ products, customers = [], onCheckout, backdate = false, openShi
   // (mis. 50.000 & 100.000). Nilai duplikat & nol disaring saat dirender.
   const quickPay = [total, ...K.quickCash.map((v) => Math.ceil(total / v) * v)];
 
+  // ===== Pop-up keranjang & pembayaran =====
+  // Menutup pop-up TIDAK menghapus apa pun: isi keranjang, pelanggan yang sudah
+  // dipilih, dan uang yang sudah diketik tetap utuh. Jadi kalau pelanggan berubah
+  // pikiran dan mau menambah barang, kasir tinggal menutup, menambah, lalu membuka
+  // lagi — tanpa kehilangan satu pun isian.
+  const closeSheet = () => setSheetOpen(false);
+  // Esc menutup pop-up (kebiasaan di laptop).
+  useEffect(() => {
+    if (!sheetOpen) return;
+    const onKey = (e) => { if (e.key === "Escape") setSheetOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [sheetOpen]);
+  // Kunci gulir halaman di belakang pop-up supaya daftar barang tidak ikut bergeser
+  // saat isi pop-up di-scroll.
+  useEffect(() => {
+    if (!sheetOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, [sheetOpen]);
+
+  // Alasan tombol bayar mati — ditulis persis di sebelah tombolnya supaya kasir
+  // tidak pernah mengira aplikasinya macet.
+  const blockReason =
+    lines.length === 0 ? "Keranjang masih kosong"
+    : backdate && !bdValid ? "Tanggal penjualan lampau belum sah"
+    : isHutang && !custPick?.name ? "Hutang wajib atas nama pelanggan"
+    : !custOk ? "Toko ini mewajibkan data pelanggan tiap transaksi"
+    : isSplit && splitSum < total ? `Bayar campur masih kurang ${rp(total - splitSum)}`
+    : isSplit && !splitChangeOk ? "Kembalian hanya boleh dari porsi tunai"
+    : isSplit && !splitOk ? "Bayar campur butuh minimal dua metode terisi"
+    : isCash && K.requirePaid && paid === "" ? "Isi “uang diterima” dulu"
+    : isCash && change < 0 ? `Uang diterima kurang ${rp(-change)}`
+    : "";
+
+  // Jumlah pengambilan per barang yang sudah masuk keranjang → lencana di kartu,
+  // supaya kasir tahu apa saja yang sudah diambil tanpa membuka pop-up.
+  const cartQty = {};
+  Object.entries(cart).forEach(([k, qty]) => {
+    const pid = k.split("|")[0];
+    cartQty[pid] = (cartQty[pid] || 0) + qty;
+  });
+
+  // Kotak cari langsung siap diketik di perangkat ber-mouse. Di tablet/HP sengaja
+  // TIDAK difokuskan otomatis: papan ketik akan naik dan menutupi daftar barang.
+  const searchRef = useRef(null);
+  useEffect(() => {
+    try {
+      if (window.matchMedia && window.matchMedia("(pointer:fine)").matches) searchRef.current?.focus();
+    } catch (e) {}
+  }, []);
+
   return (
     <div className="pos-screen">
       <section className="pos-products">
+        {/* Kotak cari ditaruh paling atas: mengetik adalah jalur tercepat mencari
+            barang, jadi ia yang pertama disentuh mata (dan kursor) kasir. */}
+        <div className="search big">
+          <Search size={18} />
+          <input
+            ref={searchRef}
+            placeholder="Cari barang untuk ditambahkan…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+          {q && <button type="button" className="icon-btn xs" title="Hapus pencarian" onClick={() => setQ("")}><X size={15} /></button>}
+        </div>
         <div className="cat-tabs">
           <button className={`cat-tab ${cat === "all" ? "on" : ""}`} onClick={() => setCat("all")}>
             <LayoutGrid size={15} /> Semua
@@ -239,10 +304,9 @@ function Kasir({ products, customers = [], onCheckout, backdate = false, openShi
             );
           })}
         </div>
-        <div className="search big">
-          <Search size={18} />
-          <input placeholder="Cari barang untuk ditambahkan…" value={q} onChange={(e) => setQ(e.target.value)} />
-        </div>
+        {(q.trim() || cat !== "all") && (
+          <div className="pos-count">{num(list.length)} barang cocok</div>
+        )}
         <div className="pos-grid">
           {list.length === 0 && <div className="empty pos-empty">Tidak ada barang cocok.</div>}
           {list.map((p) => {
@@ -251,11 +315,15 @@ function Kasir({ products, customers = [], onCheckout, backdate = false, openShi
             const cartonEff = effPrice(p.priceCarton, p.promo);
             const carton = hasCarton(p);
             const Icon = catIcon(p.category);
+            const picked = cartQty[p.id] || 0; // sudah masuk keranjang berapa kali
             return (
-              <div key={p.id} className={`pos-card ${left <= 0 ? "out" : ""}`}>
+              <div key={p.id} className={`pos-card ${left <= 0 ? "out" : ""} ${picked > 0 ? "in-cart" : ""}`}>
                 <Icon className="pos-card-wm" size={62} strokeWidth={1.4} />
                 <div className="pos-card-top">
                   <span className="pos-cat"><Icon size={12} /> {p.category}</span>
+                  {picked > 0 && (
+                    <span className="pos-incart" title="Sudah masuk keranjang"><Check size={11} strokeWidth={3} /> {picked}</span>
+                  )}
                   <span className={`pos-stock ${left <= 0 ? "zero" : ""}`}>{left <= 0 ? "Habis" : `${num(left)} ${p.unit}`}</span>
                 </div>
                 <div className="pos-name">{p.name}{hasPromo(p) && <span className="promo-tag">PROMO</span>}</div>
@@ -277,9 +345,9 @@ function Kasir({ products, customers = [], onCheckout, backdate = false, openShi
         </div>
       </section>
 
-      {/* Bilah keranjang tetap (mobile/tablet 1 kolom): total SELALU terlihat di
-          bawah; ketuk untuk membuka lembar penuh. Di desktop bilah, scrim, dan
-          pegangan ini disembunyikan oleh CSS — keranjang tetap kolom kanan biasa. */}
+      {/* Bilah keranjang: menempel di dasar layar pada SEMUA ukuran layar dan
+          selalu menampilkan total. Diketuk/diklik untuk membuka pop-up keranjang
+          & pembayaran. Layar kasir jadi 100% untuk memilih barang. */}
       <button
         type="button"
         className="cart-bar"
@@ -292,23 +360,54 @@ function Kasir({ products, customers = [], onCheckout, backdate = false, openShi
         </span>
         <span className="cart-bar-mid">
           {lines.length === 0 ? (
-            <span className="cart-bar-empty">Keranjang masih kosong</span>
+            <span className="cart-bar-empty">Keranjang masih kosong — pilih barang di atas</span>
           ) : (
             <>
               <span className="cart-bar-total tab">{rp(total)}</span>
-              <span className="cart-bar-label">{lines.length} item · ketuk untuk bayar</span>
+              <span className="cart-bar-label">{lines.length} item di keranjang</span>
             </>
           )}
         </span>
+        <span className="cart-bar-cta"><Wallet size={16} /> <span>Keranjang &amp; Bayar</span></span>
         {lines.length > 0 && <ChevronUp className="cart-bar-caret" size={20} />}
       </button>
-      {sheetOpen && <div className="sheet-scrim" onClick={() => setSheetOpen(false)} />}
 
-      <aside className={`cart ${sheetOpen ? "sheet-open" : ""}`}>
-        <button type="button" className="sheet-close" onClick={() => setSheetOpen(false)} aria-label="Tutup keranjang">
-          <span className="sheet-grip" />
-        </button>
-        <div className="cart-head"><ShoppingCart size={18} /> <span>Keranjang</span><span className="cart-count" key={lines.length}>{lines.length}</span></div>
+      {/* ===================== Pop-up keranjang & pembayaran =====================
+          Semua yang dulu memakan kolom kanan (keranjang, pelanggan, pembayaran)
+          pindah ke sini. Ada TIGA jalan keluar yang semuanya menyimpan keadaan:
+          tombol X, tombol "Tambah barang", dan tombol Esc.
+          Latar gelap SENGAJA tidak bisa diklik untuk menutup — satu ketukan
+          meleset saat pelanggan sedang di depan meja tidak boleh membatalkan
+          layar pembayaran. Latar tetap dipasang untuk memblokir klik ke kartu
+          barang di belakangnya. */}
+      {sheetOpen && <div className="sheet-scrim" />}
+
+      <aside
+        className={`cart-pop ${sheetOpen ? "on" : ""}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Keranjang dan pembayaran"
+      >
+        {/* Pegangan lembar: hiasan saja, penanda bahwa ini lembar yang naik dari
+            bawah. Sengaja TIDAK bisa ditekan — penutupan hanya lewat tombol X,
+            tombol "Tambah barang", atau Esc. */}
+        <div className="sheet-close" aria-hidden="true"><span className="sheet-grip" /></div>
+        <div className="cart-head">
+          <ShoppingCart size={18} />
+          <span>Keranjang &amp; Pembayaran</span>
+          <span className="cart-count" key={lines.length}>{lines.length}</span>
+          <button
+            type="button"
+            className="icon-btn cart-x"
+            onClick={closeSheet}
+            title="Tutup — kembali memilih barang (keranjang tidak dihapus)"
+            aria-label="Tutup"
+          ><X size={18} /></button>
+        </div>
+
+        <div className="cart-body">
+        <div className="cart-pane items">
+        <div className="pane-title">Barang dibeli</div>
         <div className="cart-lines">
           {lines.length === 0 && (
             <div className="cart-empty">
@@ -320,7 +419,10 @@ function Kasir({ products, customers = [], onCheckout, backdate = false, openShi
                 <line x1="22" y1="70" x2="54" y2="70" />
               </svg>
               <div className="cart-empty-title">Keranjang masih kosong</div>
-              <div className="cart-empty-sub">Pilih barang di kiri untuk mulai transaksi</div>
+              <div className="cart-empty-sub">Tutup pop-up ini lalu pilih barang di layar kasir untuk mulai transaksi.</div>
+              <button type="button" className="btn ghost sm" onClick={closeSheet}>
+                <ChevronLeft size={14} /> Pilih barang
+              </button>
             </div>
           )}
           {lines.map((l) => (
@@ -341,10 +443,11 @@ function Kasir({ products, customers = [], onCheckout, backdate = false, openShi
             </div>
           ))}
         </div>
+        </div>
 
-        <div className="cart-foot">
+        <div className="cart-pane pay">
           {backdate && (
-            <div className="cust-box" style={{ marginBottom: 10 }}>
+            <div className="cust-box">
               <div className="cust-box-head">
                 <span className="cust-box-title"><CalendarClock size={14} /> Penjualan Lampau</span>
                 <span className="muted xs">backdate</span>
@@ -360,11 +463,11 @@ function Kasir({ products, customers = [], onCheckout, backdate = false, openShi
               </div>
             </div>
           )}
-          <div className="cart-total"><span>Total</span><span className="tab big" key={total}>{rp(total)}</span></div>
 
           {/* ===== Pelanggan: dicatat di SETIAP transaksi =====
               Pelanggan lama tinggal dipilih dari daftar (tanpa mengetik ulang),
               pelanggan baru cukup diisi sekali lalu otomatis masuk master. */}
+          <div className="pane-title">Data pelanggan</div>
           <div className="cust-box">
             {(cust || showPicker) && (
               <div className="cust-box-head">
@@ -504,6 +607,7 @@ function Kasir({ products, customers = [], onCheckout, backdate = false, openShi
             )}
           </div>
 
+          <div className="pane-title">Metode pembayaran</div>
           <div className="pay-methods">
             {payMethods.map((m) => {
               const Icon = m.icon;
@@ -611,10 +715,29 @@ function Kasir({ products, customers = [], onCheckout, backdate = false, openShi
             <div className="pay-note warn">Isi <b>uang diterima</b> dulu — wajib agar kembalian & kas laci tetap cocok saat tutup shift.</div>
           )}
 
-          <button className={`btn full pay ${isHutang ? "hutang" : ""}`} disabled={!canPay} onClick={checkout}>
-            {isHutang ? <Clock size={16} /> : (backdate ? <CalendarClock size={16} /> : <Check size={16} />)}
-            {isHutang ? (backdate ? "Catat hutang (lampau)" : "Catat hutang") : (backdate ? "Catat penjualan" : "Bayar")} {total > 0 ? rp(total) : ""}
-          </button>
+        </div>
+        </div>
+
+        {/* Kaki dipatok: Total, alasan bila tombol bayar mati, lalu DUA jalan —
+            kembali menambah barang, atau selesaikan pembayaran. Tombol Bayar
+            karena itu tidak pernah hilang walau isian pembayaran memanjang. */}
+        <div className="cart-act">
+          <div className="cart-total"><span>Total</span><span className="tab big" key={total}>{rp(total)}</span></div>
+          {!canPay && blockReason && (
+            <div className="cart-block"><AlertTriangle size={14} /> {blockReason}</div>
+          )}
+          <div className="cart-act-row">
+            <button
+              type="button"
+              className="btn ghost cart-back"
+              onClick={closeSheet}
+              title="Kembali memilih barang — isi keranjang tidak dihapus"
+            ><ChevronLeft size={16} /> <span>Tambah barang</span></button>
+            <button className={`btn pay ${isHutang ? "hutang" : ""}`} disabled={!canPay} onClick={checkout}>
+              {isHutang ? <Clock size={16} /> : (backdate ? <CalendarClock size={16} /> : <Check size={16} />)}
+              {isHutang ? (backdate ? "Catat hutang (lampau)" : "Catat hutang") : (backdate ? "Catat penjualan" : "Bayar")} {total > 0 ? rp(total) : ""}
+            </button>
+          </div>
         </div>
       </aside>
     </div>
